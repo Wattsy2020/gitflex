@@ -1,0 +1,9 @@
+src/wordlist.txt is derived from the EFF Large Wordlist
+(eff_large_wordlist.txt), created by the Electronic Frontier Foundation.
+
+Source:  https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt
+License: Creative Commons Attribution 3.0 United States (CC BY 3.0 US)
+         https://creativecommons.org/licenses/by/3.0/us/
+
+The original list's dice-roll prefixes were removed and the words were
+filtered to those with five or more characters.
