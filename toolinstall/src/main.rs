@@ -175,14 +175,10 @@ fn hash_file(path: &Path) -> Option<u64> {
 /// Append zsh aliases for tools that built successfully and don't already have one.
 /// Returns the names of aliases that were created.
 fn ensure_aliases(results: &[ToolResult]) -> Vec<String> {
-    let zshrc = match std::env::var("HOME") {
-        Ok(home) => PathBuf::from(home).join(".zshrc"),
-        Err(_) => {
-            eprintln!("Could not resolve $HOME; skipping alias setup.");
-            return Vec::new();
-        }
+    let zshrc = match get_zshrc() {
+        Some(path) => path,
+        None => return vec![]
     };
-
     let existing = std::fs::read_to_string(&zshrc).unwrap_or_default();
 
     let mut new_lines = Vec::new();
@@ -204,22 +200,81 @@ fn ensure_aliases(results: &[ToolResult]) -> Vec<String> {
     if new_lines.is_empty() {
         return created;
     }
-
-    let mut block = String::new();
-    if !existing.is_empty() && !existing.ends_with('\n') {
-        block.push('\n');
+    match update_zshrc(zshrc, existing, new_lines) {
+        Ok(_) => created,
+        Err(_) => vec![]
     }
-    block.push_str("\n# toolinstall managed aliases\n");
-    block.push_str(&new_lines.join("\n"));
-    block.push('\n');
+}
 
-    let updated = existing + &block;
+fn get_zshrc() -> Option<PathBuf> {
+    match std::env::var("HOME") {
+        Ok(home) => Some(PathBuf::from(home).join(".zshrc")),
+        Err(_) => {
+            eprintln!("Could not resolve $HOME; skipping alias setup.");
+            None
+        }
+    }
+}
+
+const TOOL_INSTALL_ZSHRC_HEADER: &str = "# toolinstall managed aliases";
+
+/// Update the Zshrc file to add the new aliases
+fn update_zshrc(zshrc: PathBuf, existing_zshrc: String, new_lines: Vec<String>) -> Result<(), ()> {
+    let updated = add_aliases_to_zshrc(existing_zshrc, new_lines);
     if let Err(e) = std::fs::write(&zshrc, updated) {
         eprintln!("Failed to update {}: {e}", zshrc.display());
-        return Vec::new();
+        Err(())
+    } else {
+        Ok(())
     }
+}
 
-    created
+/// Add the aliases to the existing zshrc string, outputting the new updated definition.
+///
+/// If the managed header already exists, the new aliases are inserted at the end of the
+/// managed block — just before the first blank line after the header, or at end of file if
+/// there isn't one. Otherwise a fresh managed block is appended, separated from any existing
+/// content by a blank line. The result always ends with a single trailing newline.
+fn add_aliases_to_zshrc(existing_zshrc: String, new_lines: Vec<String>) -> String {
+    let new_aliases = new_lines.join("\n");
+
+    match existing_zshrc
+        .lines()
+        .position(|line| line == TOOL_INSTALL_ZSHRC_HEADER)
+    {
+        // Header already present: append to the managed block.
+        Some(header_idx) => {
+            let mut lines: Vec<&str> = existing_zshrc.lines().collect();
+            // First blank line after the header marks the end of the managed block; if there
+            // is none the block runs to end of file.
+            let insert_at = lines
+                .iter()
+                .skip(header_idx + 1)
+                .position(|line| line.trim().is_empty())
+                .map(|free_idx| header_idx + 1 + free_idx)
+                .unwrap_or(lines.len());
+            lines.insert(insert_at, &new_aliases);
+            let mut result = lines.join("\n");
+            result.push('\n');
+            result
+        }
+        // No header yet: append a new block. Separate it from existing content with a blank
+        // line, but don't emit a leading blank line when the file is empty.
+        None => {
+            let mut result = existing_zshrc;
+            if !result.is_empty() {
+                if !result.ends_with('\n') {
+                    result.push('\n');
+                }
+                result.push('\n');
+            }
+            result.push_str(TOOL_INSTALL_ZSHRC_HEADER);
+            result.push('\n');
+            result.push_str(&new_aliases);
+            result.push('\n');
+            result
+        }
+    }
 }
 
 /// True if `~/.zshrc` already defines `alias <name>=...` (tolerating leading whitespace).
@@ -275,5 +330,119 @@ fn print_group(label: &str, names: &[&str]) {
         println!("{label}: none");
     } else {
         println!("{label}: {}", names.join(", "));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEADER: &str = TOOL_INSTALL_ZSHRC_HEADER;
+
+    fn add(existing: &str, aliases: &[&str]) -> String {
+        let aliases = aliases.iter().map(|s| s.to_string()).collect();
+        add_aliases_to_zshrc(existing.to_string(), aliases)
+    }
+
+    // ---- header absent ----
+
+    #[test]
+    fn header_absent_empty_file_has_no_leading_blank() {
+        let out = add("", &["alias a=\"/x\""]);
+        assert_eq!(out, format!("{HEADER}\nalias a=\"/x\"\n"));
+    }
+
+    #[test]
+    fn header_absent_file_with_trailing_newline() {
+        let out = add("alias foo='bar'\n", &["alias a=\"/x\""]);
+        assert_eq!(out, format!("alias foo='bar'\n\n{HEADER}\nalias a=\"/x\"\n"));
+    }
+
+    #[test]
+    fn header_absent_file_without_trailing_newline() {
+        let out = add("alias foo='bar'", &["alias a=\"/x\""]);
+        assert_eq!(out, format!("alias foo='bar'\n\n{HEADER}\nalias a=\"/x\"\n"));
+    }
+
+    #[test]
+    fn header_absent_multiple_aliases() {
+        let out = add("", &["alias a=\"/x\"", "alias b=\"/y\""]);
+        assert_eq!(out, format!("{HEADER}\nalias a=\"/x\"\nalias b=\"/y\"\n"));
+    }
+
+    // ---- header present ----
+
+    #[test]
+    fn header_present_no_aliases_after() {
+        let out = add(&format!("{HEADER}\n"), &["alias a=\"/x\""]);
+        assert_eq!(out, format!("{HEADER}\nalias a=\"/x\"\n"));
+    }
+
+    #[test]
+    fn header_present_appends_after_existing_aliases() {
+        let existing = format!("{HEADER}\nalias old=\"/old\"\n");
+        let out = add(&existing, &["alias a=\"/x\""]);
+        assert_eq!(out, format!("{HEADER}\nalias old=\"/old\"\nalias a=\"/x\"\n"));
+    }
+
+    #[test]
+    fn header_present_inserts_before_trailing_user_content() {
+        let existing = format!("{HEADER}\nalias old=\"/old\"\n\nexport PATH=/usr/bin\n");
+        let out = add(&existing, &["alias a=\"/x\""]);
+        assert_eq!(
+            out,
+            format!("{HEADER}\nalias old=\"/old\"\nalias a=\"/x\"\n\nexport PATH=/usr/bin\n")
+        );
+    }
+
+    #[test]
+    fn header_present_with_content_before_and_after_block() {
+        let existing = format!("alias foo='bar'\n\n{HEADER}\nalias old=\"/old\"\n");
+        let out = add(&existing, &["alias a=\"/x\""]);
+        assert_eq!(
+            out,
+            format!("alias foo='bar'\n\n{HEADER}\nalias old=\"/old\"\nalias a=\"/x\"\n")
+        );
+    }
+
+    #[test]
+    fn header_present_without_trailing_newline() {
+        let out = add(HEADER, &["alias a=\"/x\""]);
+        assert_eq!(out, format!("{HEADER}\nalias a=\"/x\"\n"));
+    }
+
+    /// Running the installer repeatedly must keep a single header and accumulate aliases.
+    #[test]
+    fn idempotent_across_runs_keeps_single_header() {
+        let run1 = add("alias foo='bar'\n", &["alias a=\"/x\""]);
+        let run2 = add(&run1, &["alias b=\"/y\""]);
+        assert_eq!(run2.matches(HEADER).count(), 1);
+        assert_eq!(
+            run2,
+            format!("alias foo='bar'\n\n{HEADER}\nalias a=\"/x\"\nalias b=\"/y\"\n")
+        );
+    }
+
+    // ---- alias_exists ----
+
+    #[test]
+    fn alias_exists_detects_present() {
+        assert!(alias_exists("alias passwordgen=\"/bin/pg\"\n", "passwordgen"));
+    }
+
+    #[test]
+    fn alias_exists_tolerates_leading_whitespace() {
+        assert!(alias_exists("    alias pg=\"/bin/pg\"", "pg"));
+    }
+
+    #[test]
+    fn alias_exists_no_false_positive_on_name_prefix() {
+        // "pg" must not match an alias named "pgcli".
+        assert!(!alias_exists("alias pgcli=\"/bin/pgcli\"\n", "pg"));
+    }
+
+    #[test]
+    fn alias_exists_absent() {
+        assert!(!alias_exists("alias other='x'\n", "pg"));
     }
 }
