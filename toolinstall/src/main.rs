@@ -200,7 +200,10 @@ fn ensure_aliases(results: &[ToolResult]) -> Vec<String> {
     if new_lines.is_empty() {
         return created;
     }
-    match update_zshrc(zshrc, existing, new_lines) {
+    // Every tool we manage; used to find the end of the managed alias block, ignoring any
+    // unrelated user-defined aliases that happen to sit right after it.
+    let managed_names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+    match update_zshrc(zshrc, existing, new_lines, &managed_names) {
         Ok(_) => created,
         Err(_) => vec![]
     }
@@ -219,8 +222,13 @@ fn get_zshrc() -> Option<PathBuf> {
 const TOOL_INSTALL_ZSHRC_HEADER: &str = "# toolinstall managed aliases";
 
 /// Update the Zshrc file to add the new aliases
-fn update_zshrc(zshrc: PathBuf, existing_zshrc: String, new_lines: Vec<String>) -> Result<(), ()> {
-    let updated = add_aliases_to_zshrc(existing_zshrc, new_lines);
+fn update_zshrc(
+    zshrc: PathBuf,
+    existing_zshrc: String,
+    new_lines: Vec<String>,
+    managed_names: &[&str],
+) -> Result<(), ()> {
+    let updated = add_aliases_to_zshrc(existing_zshrc, new_lines, managed_names);
     if let Err(e) = std::fs::write(&zshrc, updated) {
         eprintln!("Failed to update {}: {e}", zshrc.display());
         Err(())
@@ -230,27 +238,27 @@ fn update_zshrc(zshrc: PathBuf, existing_zshrc: String, new_lines: Vec<String>) 
 }
 
 /// Add the aliases to the existing zshrc string, outputting the new updated definition.
-///
-/// If the managed header already exists, the new aliases are inserted at the end of the
-/// managed block — just before the first blank line after the header, or at end of file if
-/// there isn't one. Otherwise a fresh managed block is appended, separated from any existing
-/// content by a blank line. The result always ends with a single trailing newline.
-fn add_aliases_to_zshrc(existing_zshrc: String, new_lines: Vec<String>) -> String {
+fn add_aliases_to_zshrc(
+    existing_zshrc: String,
+    new_lines: Vec<String>,
+    managed_names: &[&str],
+) -> String {
     let new_aliases = new_lines.join("\n");
 
     match existing_zshrc
         .lines()
         .position(|line| line == TOOL_INSTALL_ZSHRC_HEADER)
     {
-        // Header already present: append to the managed block.
+        // Header already present: append after the existing managed aliases in the block.
         Some(header_idx) => {
             let mut lines: Vec<&str> = existing_zshrc.lines().collect();
-            // First blank line after the header marks the end of the managed block; if there
-            // is none the block runs to end of file.
+            // The managed block is the run of our own alias lines right after the header.
+            // Insert at the first line that isn't one of our managed aliases
+            // i.e. a blank, comment, command, an unrelated user-defined alias
             let insert_at = lines
                 .iter()
                 .skip(header_idx + 1)
-                .position(|line| line.trim().is_empty())
+                .position(|line| !is_managed_alias_line(line, managed_names))
                 .map(|free_idx| header_idx + 1 + free_idx)
                 .unwrap_or(lines.len());
             lines.insert(insert_at, &new_aliases);
@@ -277,12 +285,21 @@ fn add_aliases_to_zshrc(existing_zshrc: String, new_lines: Vec<String>) -> Strin
     }
 }
 
+/// True if `line` defines `alias <name>=...` (tolerating leading whitespace).
+fn line_defines_alias(line: &str, name: &str) -> bool {
+    line.trim_start().starts_with(&format!("alias {name}="))
+}
+
+/// True if `line` defines an alias for any tool we manage.
+fn is_managed_alias_line(line: &str, managed_names: &[&str]) -> bool {
+    managed_names
+        .iter()
+        .any(|name| line_defines_alias(line, name))
+}
+
 /// True if `~/.zshrc` already defines `alias <name>=...` (tolerating leading whitespace).
 fn alias_exists(zshrc: &str, name: &str) -> bool {
-    let prefix = format!("alias {name}=");
-    zshrc
-        .lines()
-        .any(|line| line.trim_start().starts_with(&prefix))
+    zshrc.lines().any(|line| line_defines_alias(line, name))
 }
 
 fn print_summary(results: &[ToolResult], created_aliases: &[String]) {
@@ -339,34 +356,36 @@ mod tests {
 
     const HEADER: &str = TOOL_INSTALL_ZSHRC_HEADER;
 
-    fn add(existing: &str, aliases: &[&str]) -> String {
+    /// `aliases` are the formatted lines to add; `managed` are the tool names this installer
+    /// owns (used to find the end of the managed block).
+    fn add(existing: &str, aliases: &[&str], managed: &[&str]) -> String {
         let aliases = aliases.iter().map(|s| s.to_string()).collect();
-        add_aliases_to_zshrc(existing.to_string(), aliases)
+        add_aliases_to_zshrc(existing.to_string(), aliases, managed)
     }
 
     // ---- header absent ----
 
     #[test]
     fn header_absent_empty_file_has_no_leading_blank() {
-        let out = add("", &["alias a=\"/x\""]);
+        let out = add("", &["alias a=\"/x\""], &["a"]);
         assert_eq!(out, format!("{HEADER}\nalias a=\"/x\"\n"));
     }
 
     #[test]
     fn header_absent_file_with_trailing_newline() {
-        let out = add("alias foo='bar'\n", &["alias a=\"/x\""]);
+        let out = add("alias foo='bar'\n", &["alias a=\"/x\""], &["a"]);
         assert_eq!(out, format!("alias foo='bar'\n\n{HEADER}\nalias a=\"/x\"\n"));
     }
 
     #[test]
     fn header_absent_file_without_trailing_newline() {
-        let out = add("alias foo='bar'", &["alias a=\"/x\""]);
+        let out = add("alias foo='bar'", &["alias a=\"/x\""], &["a"]);
         assert_eq!(out, format!("alias foo='bar'\n\n{HEADER}\nalias a=\"/x\"\n"));
     }
 
     #[test]
     fn header_absent_multiple_aliases() {
-        let out = add("", &["alias a=\"/x\"", "alias b=\"/y\""]);
+        let out = add("", &["alias a=\"/x\"", "alias b=\"/y\""], &["a", "b"]);
         assert_eq!(out, format!("{HEADER}\nalias a=\"/x\"\nalias b=\"/y\"\n"));
     }
 
@@ -374,21 +393,21 @@ mod tests {
 
     #[test]
     fn header_present_no_aliases_after() {
-        let out = add(&format!("{HEADER}\n"), &["alias a=\"/x\""]);
+        let out = add(&format!("{HEADER}\n"), &["alias a=\"/x\""], &["a"]);
         assert_eq!(out, format!("{HEADER}\nalias a=\"/x\"\n"));
     }
 
     #[test]
     fn header_present_appends_after_existing_aliases() {
         let existing = format!("{HEADER}\nalias old=\"/old\"\n");
-        let out = add(&existing, &["alias a=\"/x\""]);
+        let out = add(&existing, &["alias a=\"/x\""], &["old", "a"]);
         assert_eq!(out, format!("{HEADER}\nalias old=\"/old\"\nalias a=\"/x\"\n"));
     }
 
     #[test]
     fn header_present_inserts_before_trailing_user_content() {
         let existing = format!("{HEADER}\nalias old=\"/old\"\n\nexport PATH=/usr/bin\n");
-        let out = add(&existing, &["alias a=\"/x\""]);
+        let out = add(&existing, &["alias a=\"/x\""], &["old", "a"]);
         assert_eq!(
             out,
             format!("{HEADER}\nalias old=\"/old\"\nalias a=\"/x\"\n\nexport PATH=/usr/bin\n")
@@ -398,7 +417,7 @@ mod tests {
     #[test]
     fn header_present_with_content_before_and_after_block() {
         let existing = format!("alias foo='bar'\n\n{HEADER}\nalias old=\"/old\"\n");
-        let out = add(&existing, &["alias a=\"/x\""]);
+        let out = add(&existing, &["alias a=\"/x\""], &["old", "a"]);
         assert_eq!(
             out,
             format!("alias foo='bar'\n\n{HEADER}\nalias old=\"/old\"\nalias a=\"/x\"\n")
@@ -406,16 +425,67 @@ mod tests {
     }
 
     #[test]
+    fn header_present_inserts_before_command_with_no_blank_separator() {
+        let existing = format!("{HEADER}\nalias old=\"/old\"\nexport PATH=/usr/bin\n");
+        let out = add(&existing, &["alias a=\"/x\""], &["old", "a"]);
+        assert_eq!(
+            out,
+            format!("{HEADER}\nalias old=\"/old\"\nalias a=\"/x\"\nexport PATH=/usr/bin\n")
+        );
+    }
+
+    #[test]
+    fn header_present_inserts_before_comment_with_no_blank_separator() {
+        let existing = format!("{HEADER}\nalias old=\"/old\"\n# unrelated comment\n");
+        let out = add(&existing, &["alias a=\"/x\""], &["old", "a"]);
+        assert_eq!(
+            out,
+            format!("{HEADER}\nalias old=\"/old\"\nalias a=\"/x\"\n# unrelated comment\n")
+        );
+    }
+
+    /// The key reason for tracking managed names: an unrelated user alias placed directly
+    /// after our block (no blank separator) must NOT be swept inside it.
+    #[test]
+    fn header_present_inserts_before_unrelated_user_alias() {
+        let existing = format!("{HEADER}\nalias old=\"/old\"\nalias myown='whatever'\n");
+        let out = add(&existing, &["alias a=\"/x\""], &["old", "a"]);
+        assert_eq!(
+            out,
+            format!("{HEADER}\nalias old=\"/old\"\nalias a=\"/x\"\nalias myown='whatever'\n")
+        );
+    }
+
+    #[test]
+    fn header_immediately_followed_by_comment() {
+        let existing = format!("{HEADER}\n# note\n");
+        let out = add(&existing, &["alias a=\"/x\""], &["a"]);
+        assert_eq!(out, format!("{HEADER}\nalias a=\"/x\"\n# note\n"));
+    }
+
+    #[test]
+    fn is_managed_alias_line_only_matches_managed_names() {
+        let managed = &["old", "a"];
+        assert!(is_managed_alias_line("alias old=\"/old\"", managed));
+        assert!(is_managed_alias_line("    alias a='x'", managed));
+        assert!(!is_managed_alias_line("alias myown='x'", managed));
+        assert!(!is_managed_alias_line("# comment", managed));
+        assert!(!is_managed_alias_line("export PATH=/usr/bin", managed));
+        // "old" must not match an alias named "older".
+        assert!(!is_managed_alias_line("alias older='x'", managed));
+    }
+
+    #[test]
     fn header_present_without_trailing_newline() {
-        let out = add(HEADER, &["alias a=\"/x\""]);
+        let out = add(HEADER, &["alias a=\"/x\""], &["a"]);
         assert_eq!(out, format!("{HEADER}\nalias a=\"/x\"\n"));
     }
 
     /// Running the installer repeatedly must keep a single header and accumulate aliases.
     #[test]
     fn idempotent_across_runs_keeps_single_header() {
-        let run1 = add("alias foo='bar'\n", &["alias a=\"/x\""]);
-        let run2 = add(&run1, &["alias b=\"/y\""]);
+        let run1 = add("alias foo='bar'\n", &["alias a=\"/x\""], &["a"]);
+        let run2 = add(&run1, &["alias b=\"/y\""], &["a", "b"]);
         assert_eq!(run2.matches(HEADER).count(), 1);
         assert_eq!(
             run2,
