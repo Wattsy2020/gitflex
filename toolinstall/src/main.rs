@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// What happened to a tool after building it.
+#[derive(Debug, Eq, PartialEq)]
 enum Outcome {
     NewlyInstalled,
     Updated,
@@ -11,6 +12,7 @@ enum Outcome {
     Failed(String),
 }
 
+#[derive(Debug)]
 struct ToolResult {
     name: String,
     outcome: Outcome,
@@ -61,21 +63,25 @@ fn base_dir() -> Option<PathBuf> {
 }
 
 /// A tool is any direct subdirectory containing a `Cargo.toml`.
-fn discover_tools(base: &Path) -> Vec<PathBuf> {
+fn discover_tools(base: &Path) -> Box<[PathBuf]> {
     let entries = match std::fs::read_dir(base) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("Failed to read {}: {e}", base.display());
-            return vec![];
+            return Box::new([]);
         }
     };
-    let mut tools = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() && path.join("Cargo.toml").is_file() {
-            tools.push(path);
-        }
-    }
+    let mut tools: Box<[PathBuf]> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() && path.join("Cargo.toml").is_file() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
     tools.sort();
     tools
 }
@@ -134,6 +140,7 @@ fn process_tool(dir: &Path) -> ToolResult {
 }
 
 /// Hand-parse `name = "..."` from the `[package]` section of a Cargo.toml.
+/// Note: we don't use a TOML parsing crate to have the install tool have 0 dependencies, making it simpler and faster to build
 fn package_name(cargo_toml: &Path) -> Option<String> {
     let content = std::fs::read_to_string(cargo_toml).ok()?;
     let mut in_package = false;
@@ -143,16 +150,14 @@ fn package_name(cargo_toml: &Path) -> Option<String> {
             in_package = line == "[package]";
             continue;
         }
-        if !in_package {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("name") {
+        if in_package && let Some(rest) = line.strip_prefix("name") {
             let rest = rest.trim_start();
             if let Some(rest) = rest.strip_prefix('=') {
                 let value = rest.trim().trim_matches('"').trim_matches('\'');
                 if !value.is_empty() {
                     return Some(value.to_string());
                 }
+                return None // name = '' was parsed but there was an empty name, so no name is found
             }
         }
     }
@@ -226,17 +231,17 @@ fn alias_exists(zshrc: &str, name: &str) -> bool {
 }
 
 fn print_summary(results: &[ToolResult], created_aliases: &[String]) {
-    let collect = |f: &dyn Fn(&Outcome) -> bool| -> Vec<&str> {
+    let collect_outcomes = |outcome: Outcome| -> Vec<&str> {
         results
             .iter()
-            .filter(|r| f(&r.outcome))
+            .filter(|r| r.outcome == outcome)
             .map(|r| r.name.as_str())
             .collect()
     };
 
-    let newly = collect(&|o| matches!(o, Outcome::NewlyInstalled));
-    let updated = collect(&|o| matches!(o, Outcome::Updated));
-    let unchanged = collect(&|o| matches!(o, Outcome::Unchanged));
+    let newly = collect_outcomes(Outcome::NewlyInstalled);
+    let updated = collect_outcomes(Outcome::Updated);
+    let unchanged = collect_outcomes(Outcome::Unchanged);
 
     println!("==================== Summary ====================");
     print_group("Newly installed", &newly);
