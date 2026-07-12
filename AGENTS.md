@@ -7,4 +7,4 @@ Prefer functional style such as .iter() functions over for loops, or option.map(
 
 Write modular code to support code reuse and deduplication, design abstractions to represent frequently repeated patterns.
 Split modules into files and intentionally design the API so that implementation details are private.
-Use existing libraries where relevant.
+Use libraries where relevant, both those already in the cargo.toml and other useful libraries.

@@ -214,7 +214,7 @@ fn main() -> io::Result<()> {
     let repository = match Repository::discover(".") {
         Ok(repository) => repository,
         Err(e) => {
-            eprintln!("Failed to list branches: {e}");
+            eprintln!("Failed to find git repository: {e}");
             std::process::exit(1);
         }
     };

@@ -2,7 +2,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::path::Path;
 
-use git2::BranchType;
+use git2::{BranchType, Repository as GitRepository};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalBranch {
@@ -24,10 +24,14 @@ pub struct Repository {
     inner: git2::Repository,
 }
 
+fn new_repository(repository: GitRepository) -> Repository {
+    Repository { inner: repository }
+}
+
 impl Repository {
     pub fn discover(path: impl AsRef<Path>) -> Result<Self, Error> {
         git2::Repository::discover(path)
-            .map(|inner| Self { inner })
+            .map(new_repository)
             .map_err(Error::Discover)
     }
 
@@ -38,16 +42,14 @@ impl Repository {
             .map_err(Error::ListBranches)?
             .map(|branch| {
                 let (branch, _) = branch.map_err(Error::ListBranches)?;
-                let name = branch
+                branch
                     .name()
                     .map_err(Error::ListBranches)?
-                    .ok_or(Error::InvalidBranchName)?
-                    .to_owned();
-
-                Ok(LocalBranch {
-                    name,
-                    is_current: branch.is_head(),
-                })
+                    .ok_or(Error::InvalidBranchName)
+                    .map(|name| LocalBranch {
+                        name: name.to_string(),
+                        is_current: branch.is_head(),
+                    })
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
@@ -117,7 +119,7 @@ mod tests {
     use git2::{ErrorCode, Repository as GitRepository, Signature};
     use tempfile::TempDir;
 
-    use super::Repository;
+    use super::{Repository, new_repository};
 
     fn repository_with_branches() -> (TempDir, GitRepository) {
         let directory = TempDir::new().expect("temporary directory should be created");
@@ -157,10 +159,6 @@ mod tests {
         (directory, repository)
     }
 
-    fn wrapper(repository: GitRepository) -> Repository {
-        Repository { inner: repository }
-    }
-
     #[test]
     fn discovers_repository_from_nested_directory() {
         let (directory, _) = repository_with_branches();
@@ -184,7 +182,7 @@ mod tests {
     #[test]
     fn lists_local_branches_in_name_order_and_marks_current_branch() {
         let (_directory, repository) = repository_with_branches();
-        let branches = wrapper(repository)
+        let branches = new_repository(repository)
             .local_branches()
             .expect("branches should be listed");
 
@@ -209,7 +207,7 @@ mod tests {
             .set_head_detached(head)
             .expect("HEAD should detach");
 
-        let branches = wrapper(repository)
+        let branches = new_repository(repository)
             .local_branches()
             .expect("branches should be listed");
 
@@ -219,7 +217,7 @@ mod tests {
     #[test]
     fn deletes_non_current_branch() {
         let (_directory, repository) = repository_with_branches();
-        let repository = wrapper(repository);
+        let repository = new_repository(repository);
         let feature = repository
             .local_branches()
             .expect("branches should be listed")
@@ -242,7 +240,7 @@ mod tests {
     #[test]
     fn refuses_to_delete_current_branch() {
         let (_directory, repository) = repository_with_branches();
-        let repository = wrapper(repository);
+        let repository = new_repository(repository);
         let current = repository
             .local_branches()
             .expect("branches should be listed")
