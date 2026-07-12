@@ -21,63 +21,114 @@ mod git;
 
 use git::{Checkout, LocalBranch, Repository};
 
+struct Branch {
+    branch: LocalBranch,
+    selected: bool,
+}
+
+impl Branch {
+    fn new(branch: LocalBranch) -> Self {
+        Self {
+            selected: branch.is_deletable(),
+            branch,
+        }
+    }
+
+    fn toggle(&mut self) {
+        if self.branch.is_deletable() {
+            self.selected = !self.selected;
+        }
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+
+    fn git_branch(&self) -> LocalBranch {
+        self.branch.clone()
+    }
+
+    fn branch_text(&self) -> String {
+        let mark = if self.selected { "[x]" } else { "[ ]" };
+        let name = self.branch.name();
+        match self.branch.checkout() {
+            Checkout::Available => format!("{} {}", mark, name),
+            Checkout::CurrentWorktree => format!("{} {} (current)", mark, name),
+            Checkout::OtherWorktree => format!("{} {} (other worktree)", mark, name),
+        }
+    }
+
+    fn branch_style(&self) -> Style {
+        if !self.branch.is_deletable() {
+            Style::default().fg(Color::DarkGray)
+        } else if self.selected {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default()
+        }
+    }
+
+    fn render_branch(&self) -> ListItem<'_> {
+        ListItem::new(Line::from(Span::styled(
+            self.branch_text(),
+            self.branch_style(),
+        )))
+    }
+}
+
 struct App {
-    branches: Vec<LocalBranch>,
-    selected: Vec<bool>,
+    branches: Vec<Branch>,
     state: ListState,
 }
 
 impl App {
     fn new(branches: Vec<LocalBranch>) -> Self {
-        let selected = branches.iter().map(LocalBranch::is_deletable).collect();
-        let mut state = ListState::default();
-        if !branches.is_empty() {
-            state.select(Some(0));
-        }
+        let state = ListState::default().with_selected(Some(0));
         Self {
-            branches,
-            selected,
+            branches: branches.into_iter().map(Branch::new).collect(),
             state,
         }
     }
 
+    fn get_list_pos(&self) -> usize {
+        self.state
+            .selected()
+            .expect("A list element is always selected")
+    }
+
     fn next(&mut self) {
-        if self.branches.is_empty() {
-            return;
-        }
-        let i = match self.state.selected() {
-            Some(i) => (i + 1).min(self.branches.len() - 1),
-            None => 0,
-        };
+        let i = (self.get_list_pos() + 1).min(self.branches.len() - 1);
         self.state.select(Some(i));
     }
 
     fn prev(&mut self) {
-        if self.branches.is_empty() {
-            return;
-        }
-        let i = match self.state.selected() {
-            Some(0) => 0,
-            Some(i) => i - 1,
-            None => 0,
-        };
+        let i = self.get_list_pos().saturating_sub(1);
         self.state.select(Some(i));
     }
 
     fn toggle(&mut self) {
-        if let Some(i) = self.state.selected() {
-            if self.branches[i].is_deletable() {
-                self.selected[i] = !self.selected[i];
-            }
-        }
+        let i = self.get_list_pos();
+        self.branches[i].toggle();
     }
 
     fn branches_to_delete(&self) -> Vec<LocalBranch> {
         self.branches
             .iter()
-            .zip(self.selected.iter())
-            .filter_map(|(branch, &selected)| selected.then_some(branch.clone()))
+            .filter_map(|branch| branch.is_selected().then_some(branch.git_branch()))
             .collect()
+    }
+
+    fn render_branches(branches: &[Branch]) -> List<'_> {
+        let items: Vec<ListItem> = branches.iter().map(Branch::render_branch).collect();
+
+        List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("Branches"))
+            .highlight_style(
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .bg(Color::DarkGray),
+            )
+            .highlight_symbol("> ")
     }
 }
 
@@ -146,42 +197,8 @@ fn run(
                 .constraints([Constraint::Min(1), Constraint::Length(3)])
                 .split(f.area());
 
-            let items: Vec<ListItem> = app
-                .branches
-                .iter()
-                .zip(app.selected.iter())
-                .map(|(branch, &selected)| {
-                    let mark = if selected { "[x]" } else { "[ ]" };
-                    let label = match branch.checkout() {
-                        Checkout::Available => format!("{} {}", mark, branch.name()),
-                        Checkout::CurrentWorktree => {
-                            format!("{} {} (current)", mark, branch.name())
-                        }
-                        Checkout::OtherWorktree => {
-                            format!("{} {} (other worktree)", mark, branch.name())
-                        }
-                    };
-                    let style = if !branch.is_deletable() {
-                        Style::default().fg(Color::DarkGray)
-                    } else if selected {
-                        Style::default().fg(Color::Red)
-                    } else {
-                        Style::default()
-                    };
-                    ListItem::new(Line::from(Span::styled(label, style)))
-                })
-                .collect();
-
-            let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title("Branches"))
-                .highlight_style(
-                    Style::default()
-                        .add_modifier(Modifier::BOLD)
-                        .bg(Color::DarkGray),
-                )
-                .highlight_symbol("> ");
-
-            f.render_stateful_widget(list, chunks[0], &mut app.state);
+            let branch_list = App::render_branches(&app.branches);
+            f.render_stateful_widget(branch_list, chunks[0], &mut app.state);
 
             let help = Paragraph::new(
                 "↑/↓ navigate   space toggle   cmd/ctrl+enter delete selected   q/esc quit",
