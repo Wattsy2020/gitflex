@@ -1,14 +1,17 @@
-use crate::{Error, git::Repository, ui};
+use crate::{
+    Error,
+    git::Repository,
+    ui::{self, App, Mode, SingleOperation},
+};
 
 pub fn run(repository: &Repository) -> Result<(), Error> {
     let branches = repository.local_branches()?;
-
-    if !branches.iter().any(|branch| branch.is_switchable()) {
+    let Some(app) = App::new(branches, Mode::Single(SingleOperation::Switch)) else {
         println!("No branches available to switch to.");
         return Ok(());
-    }
+    };
 
-    match ui::select_one(branches, ui::SingleOperation::Switch)? {
+    match ui::select_one(app)? {
         None => println!("Cancelled."),
         Some(branch) => {
             repository.switch_to(&branch)?;

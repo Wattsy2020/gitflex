@@ -23,7 +23,7 @@ pub enum SingleOperation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Mode {
+pub enum Mode {
     Clean,
     Single(SingleOperation),
 }
@@ -120,14 +120,14 @@ enum Selection {
     One(LocalBranch),
 }
 
-struct App {
+pub struct App {
     branches: Vec<Branch>,
     mode: Mode,
     state: ListState,
 }
 
 impl App {
-    fn new(branches: Vec<LocalBranch>, mode: Mode) -> Self {
+    pub fn new(branches: Vec<LocalBranch>, mode: Mode) -> Option<Self> {
         let branches = branches
             .into_iter()
             .map(|branch| Branch::new(branch, mode))
@@ -137,8 +137,8 @@ impl App {
             mode,
             state: ListState::default(),
         };
-        app.state.select(Some(app.first_selectable()));
-        app
+        app.state.select(Some(app.first_selectable()?));
+        Some(app)
     }
 
     fn position(&self) -> usize {
@@ -147,11 +147,10 @@ impl App {
             .expect("a list element is always selected")
     }
 
-    fn first_selectable(&self) -> usize {
+    fn first_selectable(&self) -> Option<usize> {
         self.branches
             .iter()
             .position(|branch| self.mode.is_selectable(branch))
-            .unwrap_or(0)
     }
 
     fn next(&mut self) {
@@ -283,8 +282,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<Option<Selec
     }
 }
 
-pub fn select_many(branches: Vec<LocalBranch>) -> io::Result<Option<Vec<LocalBranch>>> {
-    let mut app = App::new(branches, Mode::Clean);
+pub fn select_many(mut app: App) -> io::Result<Option<Vec<LocalBranch>>> {
     ratatui::run(|terminal| run(terminal, &mut app)).map(|selection| {
         selection.map(|selection| match selection {
             Selection::Many(branches) => branches,
@@ -293,11 +291,7 @@ pub fn select_many(branches: Vec<LocalBranch>) -> io::Result<Option<Vec<LocalBra
     })
 }
 
-pub fn select_one(
-    branches: Vec<LocalBranch>,
-    operation: SingleOperation,
-) -> io::Result<Option<LocalBranch>> {
-    let mut app = App::new(branches, Mode::Single(operation));
+pub fn select_one(mut app: App) -> io::Result<Option<LocalBranch>> {
     ratatui::run(|terminal| run(terminal, &mut app)).map(|selection| {
         selection.map(|selection| match selection {
             Selection::One(branch) => branch,
@@ -325,7 +319,8 @@ mod tests {
                 branch("main", Checkout::CurrentWorktree),
             ],
             Mode::Clean,
-        );
+        )
+        .unwrap();
 
         let Selection::Many(branches) = app.confirm_many() else {
             panic!("clean should return multiple branches");
@@ -345,7 +340,8 @@ mod tests {
                 branch("main", Checkout::CurrentWorktree),
             ],
             Mode::Single(SingleOperation::Rebase),
-        );
+        )
+        .unwrap();
         app.next();
 
         let Some(Selection::One(branch)) = app.confirm_one() else {
@@ -362,7 +358,8 @@ mod tests {
                 branch("main", Checkout::CurrentWorktree),
             ],
             Mode::Single(SingleOperation::Switch),
-        );
+        )
+        .unwrap();
         app.next();
 
         assert!(app.confirm_one().is_none());

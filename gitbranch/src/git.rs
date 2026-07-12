@@ -165,23 +165,13 @@ impl Repository {
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
-        // if the command is being run from within a worktree, get the main repository's checked out branch
-        let main_worktree_branch = self
-            .inner
-            .is_worktree()
-            .then(|| GitRepository::open(self.inner.commondir()))
-            .transpose()?
-            .as_ref()
-            .map(checked_out_branch)
-            .transpose()?
-            .flatten();
+        // `Repository::worktrees` only returns linked worktrees, so include the main worktree explicitly
+        let main_repository = GitRepository::open(self.inner.commondir())?;
 
         Ok(linked_worktree_branches
             .into_iter()
             .flatten()
-            .chain(main_worktree_branch)
-            // if this isn't a worktree, include the checked out branch
-            .chain(self.current_branch()?)
+            .chain(checked_out_branch(&main_repository)?)
             .collect())
     }
 }
