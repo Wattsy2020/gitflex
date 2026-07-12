@@ -1,10 +1,15 @@
 This repository contains a collection of tools for personal use, thus the tools are quite specialised for my needs and don't need to be configurable.
-Each directory is a separate rust project, the git root directory doesn't have a Cargo.toml, look at the child projects instead.
 
 The repository is solely written in Rust. 
-Write clean and idomatic Rust code that is readable and maintainable by humans.
-Make illegal states unrepresentable though types and enums.
-Prefer functional style such as .iter() functions over for loops, or option.map() over manual if else.
+Write clean and idiomatic Rust code that is readable and maintainable by humans.
+Make illegal states unrepresentable by modelling invariants in the type system (e.g. as enums / structs / traits) and enforcing them at API boundaries. 
+When behavior, accepted inputs, or return types depend on a mode or state, prefer typestate, generic parameters, associated types, or mode-specific constructors and functions.
+A caller should not be able to independently choose incompatible modes and operations.
+
+Prefer functional style such as .iter() functions over for loops that transform data, or option.map() over manual if else.
+However there is no need to take this too far, prefer a for loop instead of an .iter().for_each() that prints out or does some side effect.
+Prefer a functional core with an imperative shell. Model domain operations as typed value transformations, 
+keep side effects at module boundaries, and avoid unnecessary shared mutable state.
 
 Write modular code to support code reuse and deduplication, design abstractions to represent frequently repeated patterns.
 Split modules into files and intentionally design the API so that implementation details are private.
@@ -12,4 +17,9 @@ Use libraries where relevant, both those already in the cargo.toml and other use
 
 If you see something that could be changed that would clearly improve the codebase, change it.
 
-Run these tools to validate your code: `cargo fmt --check && cargo test --locked && cargo clippy --all-targets --locked -- -D warnings`
+Each tool is an independent Rust crate, the git root directory doesn't have a Cargo.toml, only its children project have one.
+Run validation from every modified crate directory:
+
+cargo fmt --check &&
+cargo test --locked &&
+cargo clippy --all-targets --locked -- -D warnings
