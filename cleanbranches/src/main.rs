@@ -49,29 +49,34 @@ impl Branch {
     }
 
     fn branch_text(&self) -> String {
-        let mark = if self.selected { "[x]" } else { "[ ]" };
         let name = self.branch.name();
         match self.branch.checkout() {
-            Checkout::Available => format!("{} {}", mark, name),
-            Checkout::CurrentWorktree => format!("{} {} (current)", mark, name),
-            Checkout::OtherWorktree => format!("{} {} (other worktree)", mark, name),
+            Checkout::Available => {
+                format!("{} {}", if self.selected { "[x]" } else { "[ ]" }, name)
+            }
+            Checkout::CurrentWorktree => format!("{} {} (current)", "[-]", name),
+            Checkout::OtherWorktree => format!("{} {} (other worktree)", "[-]", name),
         }
     }
 
-    fn branch_style(&self) -> Style {
+    fn branch_color(&self, is_highlighted: bool) -> Color {
         if !self.branch.is_deletable() {
-            Style::default().fg(Color::DarkGray)
+            if is_highlighted {
+                Color::Gray
+            } else {
+                Color::DarkGray
+            }
         } else if self.selected {
-            Style::default().fg(Color::Red)
+            Color::Red
         } else {
-            Style::default()
+            Color::Gray
         }
     }
 
-    fn render_branch(&self) -> ListItem<'_> {
+    fn render_branch<'a, 'b>(&'a self, is_highlighted: bool) -> ListItem<'b> {
         ListItem::new(Line::from(Span::styled(
             self.branch_text(),
-            self.branch_style(),
+            Style::default().fg(self.branch_color(is_highlighted)),
         )))
     }
 }
@@ -118,8 +123,13 @@ impl App {
             .collect()
     }
 
-    fn render_branches(branches: &[Branch]) -> List<'_> {
-        let items: Vec<ListItem> = branches.iter().map(Branch::render_branch).collect();
+    fn render_branches<'a, 'b>(self: &'a Self) -> List<'b> {
+        let items: Vec<ListItem> = self
+            .branches
+            .iter()
+            .enumerate()
+            .map(|(i, branch)| branch.render_branch(self.get_list_pos() == i))
+            .collect();
 
         List::new(items)
             .block(Block::default().borders(Borders::ALL).title("Branches"))
@@ -197,7 +207,7 @@ fn run(
                 .constraints([Constraint::Min(1), Constraint::Length(3)])
                 .split(f.area());
 
-            let branch_list = App::render_branches(&app.branches);
+            let branch_list = app.render_branches();
             f.render_stateful_widget(branch_list, chunks[0], &mut app.state);
 
             let help = Paragraph::new(
