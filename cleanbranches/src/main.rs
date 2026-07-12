@@ -19,7 +19,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 mod git;
 
-use git::{LocalBranch, Repository};
+use git::{Checkout, LocalBranch, Repository};
 
 struct App {
     branches: Vec<LocalBranch>,
@@ -29,7 +29,7 @@ struct App {
 
 impl App {
     fn new(branches: Vec<LocalBranch>) -> Self {
-        let selected = branches.iter().map(|branch| !branch.is_current()).collect();
+        let selected = branches.iter().map(LocalBranch::is_deletable).collect();
         let mut state = ListState::default();
         if !branches.is_empty() {
             state.select(Some(0));
@@ -66,10 +66,9 @@ impl App {
 
     fn toggle(&mut self) {
         if let Some(i) = self.state.selected() {
-            if self.branches[i].is_current() {
-                return;
+            if self.branches[i].is_deletable() {
+                self.selected[i] = !self.selected[i];
             }
-            self.selected[i] = !self.selected[i];
         }
     }
 
@@ -153,13 +152,16 @@ fn run(
                 .zip(app.selected.iter())
                 .map(|(branch, &selected)| {
                     let mark = if selected { "[x]" } else { "[ ]" };
-                    let is_current = branch.is_current();
-                    let label = if is_current {
-                        format!("{} {} (current)", mark, branch.name())
-                    } else {
-                        format!("{} {}", mark, branch.name())
+                    let label = match branch.checkout() {
+                        Checkout::Available => format!("{} {}", mark, branch.name()),
+                        Checkout::CurrentWorktree => {
+                            format!("{} {} (current)", mark, branch.name())
+                        }
+                        Checkout::OtherWorktree => {
+                            format!("{} {} (other worktree)", mark, branch.name())
+                        }
                     };
-                    let style = if is_current {
+                    let style = if !branch.is_deletable() {
                         Style::default().fg(Color::DarkGray)
                     } else if selected {
                         Style::default().fg(Color::Red)
