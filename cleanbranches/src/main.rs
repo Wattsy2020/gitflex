@@ -1,5 +1,4 @@
 use std::io::{self, Stdout, Write};
-use std::process::Command;
 
 use crossterm::cursor::Show;
 use crossterm::event::{
@@ -18,16 +17,19 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
+mod git;
+
+use git::{LocalBranch, Repository};
+
 struct App {
-    branches: Vec<String>,
+    branches: Vec<LocalBranch>,
     selected: Vec<bool>,
-    current: String,
     state: ListState,
 }
 
 impl App {
-    fn new(branches: Vec<String>, current: String) -> Self {
-        let selected = branches.iter().map(|b| b != &current).collect();
+    fn new(branches: Vec<LocalBranch>) -> Self {
+        let selected = branches.iter().map(|branch| !branch.is_current()).collect();
         let mut state = ListState::default();
         if !branches.is_empty() {
             state.select(Some(0));
@@ -35,7 +37,6 @@ impl App {
         Self {
             branches,
             selected,
-            current,
             state,
         }
     }
@@ -65,60 +66,19 @@ impl App {
 
     fn toggle(&mut self) {
         if let Some(i) = self.state.selected() {
-            if self.branches[i] == self.current {
+            if self.branches[i].is_current() {
                 return;
             }
             self.selected[i] = !self.selected[i];
         }
     }
 
-    fn branches_to_delete(&self) -> Vec<String> {
+    fn branches_to_delete(&self) -> Vec<LocalBranch> {
         self.branches
             .iter()
             .zip(self.selected.iter())
-            .filter_map(|(b, &s)| if s { Some(b.clone()) } else { None })
+            .filter_map(|(branch, &selected)| selected.then_some(branch.clone()))
             .collect()
-    }
-}
-
-fn list_branches() -> io::Result<(Vec<String>, String)> {
-    let out = Command::new("git")
-        .args(["branch", "--format=%(refname:short)"])
-        .output()?;
-    if !out.status.success() {
-        return Err(io::Error::other(format!(
-            "git branch failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )));
-    }
-    let branches: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    let current_out = Command::new("git")
-        .args(["branch", "--show-current"])
-        .output()?;
-    let current = String::from_utf8_lossy(&current_out.stdout)
-        .trim()
-        .to_string();
-
-    Ok((branches, current))
-}
-
-/// Delete branch, returning the message from git
-fn delete_branch(name: &str) -> String {
-    match Command::new("git").args(["branch", "-D", name]).output() {
-        Ok(out) => {
-            let msg = if out.status.success() {
-                String::from_utf8_lossy(&out.stdout).trim().to_string()
-            } else {
-                String::from_utf8_lossy(&out.stderr).trim().to_string()
-            };
-            msg
-        }
-        Err(e) => format!("failed: {}", e.to_string()),
     }
 }
 
@@ -179,7 +139,7 @@ fn install_panic_hook() {
 fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
-) -> io::Result<Option<Vec<String>>> {
+) -> io::Result<Option<Vec<LocalBranch>>> {
     loop {
         terminal.draw(|f| {
             let chunks = Layout::default()
@@ -191,17 +151,17 @@ fn run(
                 .branches
                 .iter()
                 .zip(app.selected.iter())
-                .map(|(b, &s)| {
-                    let mark = if s { "[x]" } else { "[ ]" };
-                    let is_current = b == &app.current;
+                .map(|(branch, &selected)| {
+                    let mark = if selected { "[x]" } else { "[ ]" };
+                    let is_current = branch.is_current();
                     let label = if is_current {
-                        format!("{} {} (current)", mark, b)
+                        format!("{} {} (current)", mark, branch.name())
                     } else {
-                        format!("{} {}", mark, b)
+                        format!("{} {}", mark, branch.name())
                     };
                     let style = if is_current {
                         Style::default().fg(Color::DarkGray)
-                    } else if s {
+                    } else if selected {
                         Style::default().fg(Color::Red)
                     } else {
                         Style::default()
@@ -251,10 +211,17 @@ fn run(
 }
 
 fn main() -> io::Result<()> {
-    let (branches, current) = match list_branches() {
-        Ok(v) => v,
+    let repository = match Repository::discover(".") {
+        Ok(repository) => repository,
         Err(e) => {
-            eprintln!("Failed to list branches: {}", e);
+            eprintln!("Failed to list branches: {e}");
+            std::process::exit(1);
+        }
+    };
+    let branches = match repository.local_branches() {
+        Ok(branches) => branches,
+        Err(e) => {
+            eprintln!("Failed to list branches: {e}");
             std::process::exit(1);
         }
     };
@@ -264,7 +231,7 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    let mut app = App::new(branches, current);
+    let mut app = App::new(branches);
     install_panic_hook();
     let result = {
         let mut guard = TerminalGuard::new()?;
@@ -275,10 +242,12 @@ fn main() -> io::Result<()> {
         None => println!("Cancelled."),
         Some(to_delete) if to_delete.is_empty() => println!("No branches selected."),
         Some(to_delete) => {
-            for name in to_delete {
-                let msg = delete_branch(&name);
-                println!("{}", msg);
-            }
+            to_delete
+                .iter()
+                .for_each(|branch| match repository.delete_branch(branch) {
+                    Ok(()) => println!("Deleted branch {}.", branch.name()),
+                    Err(error) => println!("Failed to delete branch {}: {error}", branch.name()),
+                });
         }
     }
 
