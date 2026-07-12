@@ -1,17 +1,12 @@
-use std::io::{self, Stdout, Write};
+use std::io;
 
-use crossterm::cursor::Show;
-use crossterm::event::{
+use ratatui::DefaultTerminal;
+use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    supports_keyboard_enhancement,
-};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 
 mod git;
 mod ui;
@@ -20,64 +15,36 @@ use git::{LocalBranch, Repository};
 
 use crate::ui::App;
 
-struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-    pushed_keyboard_flags: bool,
-}
+/// Constructing it enables keyboard enhancement if possible, upon drop it cleans up by removing keyboard enhancement
+struct KeyboardEnhancementGuard;
 
-impl TerminalGuard {
-    fn new() -> io::Result<Self> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        if let Err(e) = execute!(stdout, EnterAlternateScreen) {
-            let _ = disable_raw_mode();
-            return Err(e);
-        }
-        let pushed_keyboard_flags = if supports_keyboard_enhancement().unwrap_or(false) {
-            execute!(
-                stdout,
-                PushKeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+impl KeyboardEnhancementGuard {
+    fn try_enable() -> Option<Self> {
+        supports_keyboard_enhancement()
+            .unwrap_or(false)
+            .then(|| {
+                execute!(
+                    io::stdout(),
+                    PushKeyboardEnhancementFlags(
+                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                            | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+                    )
                 )
-            )
-            .is_ok()
-        } else {
-            false
-        };
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-        Ok(Self {
-            terminal,
-            pushed_keyboard_flags,
-        })
+            })
+            .and_then(Result::ok)
+            .map(|()| Self)
     }
 }
 
-impl Drop for TerminalGuard {
+impl Drop for KeyboardEnhancementGuard {
     fn drop(&mut self) {
-        if self.pushed_keyboard_flags {
-            let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
-        }
-        let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show);
-        let _ = io::stdout().flush();
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
 }
 
-fn install_panic_hook() {
-    let original = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
-        let _ = io::stdout().flush();
-        original(info);
-    }));
-}
+fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<Option<Vec<LocalBranch>>> {
+    let _keyboard_enhancements = KeyboardEnhancementGuard::try_enable();
 
-fn run(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    app: &mut App,
-) -> io::Result<Option<Vec<LocalBranch>>> {
     loop {
         terminal.draw(|f| app.draw(f))?;
 
@@ -125,11 +92,7 @@ fn main() -> io::Result<()> {
     }
 
     let mut app = App::new(branches);
-    install_panic_hook();
-    let result = {
-        let mut guard = TerminalGuard::new()?;
-        run(&mut guard.terminal, &mut app)
-    };
+    let result = ratatui::run(|terminal| run(terminal, &mut app));
 
     match result? {
         None => println!("Cancelled."),

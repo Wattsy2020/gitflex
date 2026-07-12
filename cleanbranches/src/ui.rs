@@ -60,7 +60,7 @@ impl Branch {
         }
     }
 
-    fn render_branch<'a, 'b>(&'a self, is_highlighted: bool) -> ListItem<'b> {
+    fn render_branch<'b>(&self, is_highlighted: bool) -> ListItem<'b> {
         ListItem::new(Line::from(Span::styled(
             self.branch_text(),
             Style::default().fg(self.branch_color(is_highlighted)),
@@ -110,7 +110,7 @@ impl App {
             .collect()
     }
 
-    fn render_branches<'a, 'b>(self: &'a Self) -> List<'b> {
+    fn render_branches<'b>(&self) -> List<'b> {
         let items: Vec<ListItem> = self
             .branches
             .iter()
