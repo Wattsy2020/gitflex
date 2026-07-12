@@ -28,6 +28,28 @@ pub struct SingleMode {
     operation: SingleOperation,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Confirmation {
+    Plain,
+    Modified,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Action {
+    Next,
+    Previous,
+    Toggle,
+    Confirm(Confirmation),
+    Cancel,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Transition<T> {
+    Continue,
+    Complete(T),
+    Cancel,
+}
+
 trait Mode {
     type Output;
 
@@ -36,7 +58,7 @@ trait Mode {
     fn marker(&self, branch: &Branch) -> &'static str;
     fn is_selected(&self, branch: &Branch) -> bool;
     fn toggle(&self, branch: &mut Branch);
-    fn confirms(&self, modifiers: KeyModifiers) -> bool;
+    fn confirms(&self, confirmation: Confirmation) -> bool;
     fn output(&self, branches: &[Branch], position: usize) -> Option<Self::Output>;
     fn help(&self) -> &'static str;
 }
@@ -72,8 +94,8 @@ impl Mode for CleanMode {
         }
     }
 
-    fn confirms(&self, modifiers: KeyModifiers) -> bool {
-        modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+    fn confirms(&self, confirmation: Confirmation) -> bool {
+        confirmation == Confirmation::Modified
     }
 
     fn output(&self, branches: &[Branch], _position: usize) -> Option<Self::Output> {
@@ -116,7 +138,7 @@ impl Mode for SingleMode {
 
     fn toggle(&self, _branch: &mut Branch) {}
 
-    fn confirms(&self, _modifiers: KeyModifiers) -> bool {
+    fn confirms(&self, _confirmation: Confirmation) -> bool {
         true
     }
 
@@ -257,6 +279,26 @@ impl<M> App<M> {
         self.mode.output(&self.branches, self.position())
     }
 
+    fn update(&mut self, action: Action) -> Transition<M::Output>
+    where
+        M: Mode,
+    {
+        match action {
+            Action::Next => self.next(),
+            Action::Previous => self.previous(),
+            Action::Toggle => self.toggle(),
+            Action::Confirm(confirmation) if self.mode.confirms(confirmation) => {
+                return self
+                    .output()
+                    .map_or(Transition::Continue, Transition::Complete);
+            }
+            Action::Cancel => return Transition::Cancel,
+            Action::Confirm(_) => {}
+        }
+
+        Transition::Continue
+    }
+
     fn render_branches(&self) -> List<'static>
     where
         M: Mode,
@@ -323,29 +365,47 @@ impl Drop for KeyboardEnhancementGuard {
     }
 }
 
+fn action_from_key(key: event::KeyEvent) -> Option<Action> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => Some(Action::Cancel),
+        KeyCode::Down | KeyCode::Char('j') => Some(Action::Next),
+        KeyCode::Up | KeyCode::Char('k') => Some(Action::Previous),
+        KeyCode::Char(' ') => Some(Action::Toggle),
+        KeyCode::Enter => Some(Action::Confirm(
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+            {
+                Confirmation::Modified
+            } else {
+                Confirmation::Plain
+            },
+        )),
+        _ => None,
+    }
+}
+
 fn run<M: Mode>(terminal: &mut DefaultTerminal, app: &mut App<M>) -> io::Result<Option<M::Output>> {
     let _keyboard_enhancements = KeyboardEnhancementGuard::try_enable();
 
     loop {
         terminal.draw(|frame| app.draw(frame))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        let Some(action) = action_from_key(key) else {
+            continue;
+        };
 
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
-                KeyCode::Down | KeyCode::Char('j') => app.next(),
-                KeyCode::Up | KeyCode::Char('k') => app.previous(),
-                KeyCode::Char(' ') => app.toggle(),
-                KeyCode::Enter if app.mode.confirms(key.modifiers) => {
-                    if let Some(selection) = app.output() {
-                        return Ok(Some(selection));
-                    }
-                }
-                _ => {}
-            }
+        match app.update(action) {
+            Transition::Continue => {}
+            Transition::Complete(output) => return Ok(Some(output)),
+            Transition::Cancel => return Ok(None),
         }
     }
 }
@@ -362,7 +422,7 @@ pub fn select_one(mut app: App<SingleMode>) -> io::Result<Option<LocalBranch>> {
 mod tests {
     use crate::git::{Checkout, LocalBranch};
 
-    use super::{App, SingleOperation};
+    use super::{Action, App, Confirmation, SingleOperation, Transition};
 
     fn branch(name: &str, checkout: Checkout) -> LocalBranch {
         LocalBranch::for_test(name, checkout)
@@ -370,14 +430,17 @@ mod tests {
 
     #[test]
     fn clean_starts_with_every_deletable_branch_selected() {
-        let app = App::clean(vec![
+        let mut app = App::clean(vec![
             branch("feature-a", Checkout::Available),
             branch("feature-b", Checkout::Available),
             branch("main", Checkout::CurrentWorktree),
         ])
         .unwrap();
 
-        let branches = app.output().unwrap();
+        let Transition::Complete(branches) = app.update(Action::Confirm(Confirmation::Modified))
+        else {
+            panic!("a modified confirmation should complete clean selection");
+        };
         assert_eq!(
             branches.iter().map(LocalBranch::name).collect::<Vec<_>>(),
             ["feature-a", "feature-b"]
@@ -385,7 +448,31 @@ mod tests {
     }
 
     #[test]
-    fn single_selection_returns_only_the_highlighted_branch() {
+    fn clean_requires_modified_confirmation_and_toggle_changes_selection() {
+        let mut app = App::clean(vec![
+            branch("feature-a", Checkout::Available),
+            branch("feature-b", Checkout::Available),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            app.update(Action::Confirm(Confirmation::Plain)),
+            Transition::Continue
+        );
+        assert_eq!(app.update(Action::Toggle), Transition::Continue);
+
+        let Transition::Complete(branches) = app.update(Action::Confirm(Confirmation::Modified))
+        else {
+            panic!("a modified confirmation should complete clean selection");
+        };
+        assert_eq!(
+            branches.iter().map(LocalBranch::name).collect::<Vec<_>>(),
+            ["feature-b"]
+        );
+    }
+
+    #[test]
+    fn single_selection_navigates_and_confirms_the_highlighted_branch() {
         let mut app = App::single(
             vec![
                 branch("feature-a", Checkout::Available),
@@ -395,10 +482,10 @@ mod tests {
             SingleOperation::Rebase,
         )
         .unwrap();
-        app.next();
+        assert_eq!(app.update(Action::Next), Transition::Continue);
 
-        let Some(branch) = app.output() else {
-            panic!("an eligible highlighted branch should be returned");
+        let Transition::Complete(branch) = app.update(Action::Confirm(Confirmation::Plain)) else {
+            panic!("a valid single selection should complete");
         };
         assert_eq!(branch.name(), "feature-b");
     }
@@ -413,8 +500,22 @@ mod tests {
             SingleOperation::Switch,
         )
         .unwrap();
-        app.next();
+        assert_eq!(app.update(Action::Next), Transition::Continue);
 
-        assert!(app.output().is_none());
+        assert_eq!(
+            app.update(Action::Confirm(Confirmation::Plain)),
+            Transition::Continue
+        );
+    }
+
+    #[test]
+    fn cancellation_exits_without_a_selection() {
+        let mut app = App::single(
+            vec![branch("feature", Checkout::Available)],
+            SingleOperation::Switch,
+        )
+        .unwrap();
+
+        assert_eq!(app.update(Action::Cancel), Transition::Cancel);
     }
 }
