@@ -1,9 +1,10 @@
 [package]
-name = "cleanbranches"
+name = "gitbranch"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 git2 = { version = "0.21", default-features = false }
 ratatui = "0.30"
 thiserror = "2"

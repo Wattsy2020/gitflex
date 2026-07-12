@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use git2::{BranchType, ErrorCode, Repository as GitRepository};
+use git2::build::CheckoutBuilder;
+use git2::{BranchType, ErrorCode, ObjectType, Repository as GitRepository};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +19,18 @@ pub struct LocalBranch {
 }
 
 impl LocalBranch {
+    fn new(name: impl Into<String>, checkout: Checkout) -> Self {
+        Self {
+            name: name.into(),
+            checkout,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(name: impl Into<String>, checkout: Checkout) -> Self {
+        Self::new(name, checkout)
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -29,6 +42,20 @@ impl LocalBranch {
     pub fn is_deletable(&self) -> bool {
         self.checkout == Checkout::Available
     }
+
+    pub fn is_switchable(&self) -> bool {
+        self.checkout == Checkout::Available
+    }
+
+    pub fn is_rebase_target(&self) -> bool {
+        self.checkout != Checkout::CurrentWorktree
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RebaseOutcome {
+    Completed,
+    Conflicted,
 }
 
 pub struct Repository {
@@ -52,19 +79,16 @@ impl Repository {
             .branches(Some(BranchType::Local))?
             .map(|branch| {
                 let (branch, _) = branch?;
-                branch
-                    .name()?
-                    .ok_or(Error::InvalidBranchName)
-                    .map(|name| LocalBranch {
-                        name: name.to_string(),
-                        checkout: if branch.is_head() {
-                            Checkout::CurrentWorktree
-                        } else if checked_out_branches.contains(name) {
-                            Checkout::OtherWorktree
-                        } else {
-                            Checkout::Available
-                        },
-                    })
+                branch.name()?.ok_or(Error::InvalidBranchName).map(|name| {
+                    let checkout = if branch.is_head() {
+                        Checkout::CurrentWorktree
+                    } else if checked_out_branches.contains(name) {
+                        Checkout::OtherWorktree
+                    } else {
+                        Checkout::Available
+                    };
+                    LocalBranch::new(name, checkout)
+                })
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
@@ -79,6 +103,48 @@ impl Repository {
 
         let mut branch_to_delete = self.inner.find_branch(branch.name(), BranchType::Local)?;
         branch_to_delete.delete().map_err(Error::from)
+    }
+
+    pub fn current_branch(&self) -> Result<Option<String>, Error> {
+        checked_out_branch(&self.inner)
+    }
+
+    pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
+        if self.checked_out_branches()?.contains(branch.name()) {
+            return Err(Error::BranchCheckedOut(branch.name.clone()));
+        }
+
+        let branch = self.inner.find_branch(branch.name(), BranchType::Local)?;
+        let reference = branch.get();
+        let reference_name = reference.name()?;
+        let target = reference.peel(ObjectType::Commit)?;
+        let mut checkout = CheckoutBuilder::new();
+        checkout.safe();
+
+        self.inner.checkout_tree(&target, Some(&mut checkout))?;
+        self.inner.set_head(reference_name)?;
+        Ok(())
+    }
+
+    pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<RebaseOutcome, Error> {
+        if self.current_branch()?.as_deref() == Some(branch.name()) {
+            return Err(Error::CurrentBranchAsRebaseTarget);
+        }
+
+        let branch = self.inner.find_branch(branch.name(), BranchType::Local)?;
+        let upstream = self.inner.reference_to_annotated_commit(branch.get())?;
+        let signature = self.inner.signature()?;
+        let mut rebase = self.inner.rebase(None, Some(&upstream), None, None)?;
+
+        while rebase.next().transpose()?.is_some() {
+            if self.inner.index()?.has_conflicts() {
+                return Ok(RebaseOutcome::Conflicted);
+            }
+            rebase.commit(None, &signature, None)?;
+        }
+
+        rebase.finish(Some(&signature))?;
+        Ok(RebaseOutcome::Completed)
     }
 
     fn checked_out_branches(&self) -> Result<HashSet<String>, Error> {
@@ -136,16 +202,28 @@ pub enum Error {
     InvalidWorktreeName,
     #[error("branch {0} is checked out in a worktree")]
     BranchCheckedOut(String),
+    #[error("cannot rebase while HEAD is detached")]
+    DetachedHead,
+    #[error("the current branch cannot be its own rebase target")]
+    CurrentBranchAsRebaseTarget,
+    #[error(
+        "rebase stopped due to conflicts; resolve them and run `git rebase --continue`, or run `git rebase --abort`"
+    )]
+    RebaseConflicts,
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use git2::{BranchType, ErrorCode, Repository as GitRepository, Signature, WorktreeAddOptions};
+    use git2::build::CheckoutBuilder;
+    use git2::{
+        BranchType, ErrorCode, Oid, Repository as GitRepository, RepositoryState, Signature,
+        WorktreeAddOptions,
+    };
     use tempfile::TempDir;
 
-    use super::{Checkout, Error, Repository};
+    use super::{Checkout, Error, RebaseOutcome, Repository};
 
     fn repository_with_branches() -> (TempDir, GitRepository) {
         let directory = TempDir::new().expect("temporary directory should be created");
@@ -154,13 +232,22 @@ mod tests {
         repository
             .set_head("refs/heads/main")
             .expect("HEAD should point to main");
+        {
+            let mut config = repository.config().expect("config should open");
+            config
+                .set_str("user.name", "Git Branch Tests")
+                .expect("user name should be configured");
+            config
+                .set_str("user.email", "gitbranch@example.com")
+                .expect("user email should be configured");
+        }
 
         let tree_id = {
             let mut index = repository.index().expect("index should open");
             index.write_tree().expect("empty tree should be written")
         };
         let tree = repository.find_tree(tree_id).expect("tree should exist");
-        let signature = Signature::now("Clean Branches", "cleanbranches@example.com")
+        let signature = Signature::now("Git Branch", "gitbranch@example.com")
             .expect("signature should be valid");
         let commit_id = repository
             .commit(
@@ -183,6 +270,49 @@ mod tests {
         drop(commit);
 
         (directory, repository)
+    }
+
+    fn commit_file(
+        repository: &GitRepository,
+        reference: &str,
+        parent_id: Oid,
+        path: &str,
+        contents: &str,
+    ) -> Oid {
+        let parent = repository
+            .find_commit(parent_id)
+            .expect("parent commit should exist");
+        let parent_tree = parent.tree().expect("parent tree should exist");
+        let blob = repository
+            .blob(contents.as_bytes())
+            .expect("blob should be created");
+        let mut tree = repository
+            .treebuilder(Some(&parent_tree))
+            .expect("tree builder should be created");
+        tree.insert(path, blob, 0o100644)
+            .expect("file should be added to tree");
+        let tree_id = tree.write().expect("tree should be written");
+        let tree = repository.find_tree(tree_id).expect("tree should exist");
+        let signature = repository.signature().expect("signature should exist");
+
+        repository
+            .commit(
+                Some(reference),
+                &signature,
+                &signature,
+                &format!("Update {path}"),
+                &tree,
+                &[&parent],
+            )
+            .expect("commit should be created")
+    }
+
+    fn force_checkout_head(repository: &GitRepository) {
+        let mut checkout = CheckoutBuilder::new();
+        checkout.force();
+        repository
+            .checkout_head(Some(&mut checkout))
+            .expect("HEAD should be checked out");
     }
 
     fn add_feature_worktree(repository: &GitRepository, directory: &TempDir) {
@@ -369,5 +499,192 @@ mod tests {
             ]
         );
         assert!(branches.iter().all(|branch| !branch.is_deletable()));
+    }
+
+    #[test]
+    fn switches_to_available_branch() {
+        let (_directory, repository) = repository_with_branches();
+        let repository = Repository::new(repository);
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+
+        repository
+            .switch_to(&feature)
+            .expect("branch should be switched");
+
+        assert_eq!(
+            repository
+                .current_branch()
+                .expect("current branch should be read")
+                .as_deref(),
+            Some("feature")
+        );
+    }
+
+    #[test]
+    fn refuses_to_switch_to_branch_in_other_worktree() {
+        let (_dir1, _dir2, repository) = initialise_worktree();
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+
+        let error = repository
+            .switch_to(&feature)
+            .expect_err("checked-out branch should not be switched to");
+
+        assert!(matches!(error, Error::BranchCheckedOut(name) if name == "feature"));
+    }
+
+    #[test]
+    fn refuses_to_overwrite_working_tree_changes_when_switching() {
+        let (directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        commit_file(
+            &repository,
+            "refs/heads/feature",
+            initial,
+            "shared.txt",
+            "committed\n",
+        );
+        fs::write(directory.path().join("shared.txt"), "working tree\n")
+            .expect("working-tree file should be written");
+        let repository = Repository::new(repository);
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+
+        repository
+            .switch_to(&feature)
+            .expect_err("switch should not overwrite an untracked file");
+
+        assert_eq!(
+            repository
+                .current_branch()
+                .expect("current branch should be read")
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("shared.txt"))
+                .expect("working-tree file should remain"),
+            "working tree\n"
+        );
+    }
+
+    #[test]
+    fn rebases_current_branch_onto_target() {
+        let (_directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        let feature_tip = commit_file(
+            &repository,
+            "refs/heads/feature",
+            initial,
+            "feature.txt",
+            "feature\n",
+        );
+        let old_main_tip = commit_file(
+            &repository,
+            "refs/heads/main",
+            initial,
+            "main.txt",
+            "main\n",
+        );
+        force_checkout_head(&repository);
+        let repository = Repository::new(repository);
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+
+        let outcome = repository
+            .rebase_onto(&feature)
+            .expect("rebase should succeed");
+
+        let new_main_tip = repository
+            .inner
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        let new_main = repository
+            .inner
+            .find_commit(new_main_tip)
+            .expect("rebased commit should exist");
+        assert_eq!(outcome, RebaseOutcome::Completed);
+        assert_ne!(new_main_tip, old_main_tip);
+        assert_eq!(new_main.parent_id(0), Ok(feature_tip));
+        assert!(
+            new_main
+                .tree()
+                .expect("tree should exist")
+                .get_name("main.txt")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn leaves_conflicted_rebase_in_progress() {
+        let (_directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        commit_file(
+            &repository,
+            "refs/heads/feature",
+            initial,
+            "shared.txt",
+            "feature\n",
+        );
+        commit_file(
+            &repository,
+            "refs/heads/main",
+            initial,
+            "shared.txt",
+            "main\n",
+        );
+        force_checkout_head(&repository);
+        let repository = Repository::new(repository);
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+
+        let outcome = repository
+            .rebase_onto(&feature)
+            .expect("conflict should be returned as an outcome");
+
+        assert_eq!(outcome, RebaseOutcome::Conflicted);
+        assert_eq!(repository.inner.state(), RepositoryState::RebaseMerge);
+        assert!(
+            repository
+                .inner
+                .index()
+                .expect("index should open")
+                .has_conflicts()
+        );
     }
 }
