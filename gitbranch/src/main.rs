@@ -51,15 +51,15 @@ fn run() -> Result<(), Error> {
 }
 
 fn main() -> ExitCode {
-    run().map_or_else(
-        |error| {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
             if std::io::stderr().is_terminal() {
                 eprintln!("{error}\r");
             } else {
                 eprintln!("{error}");
             }
             ExitCode::FAILURE
-        },
-        |()| ExitCode::SUCCESS,
-    )
+        }
+    }
 }

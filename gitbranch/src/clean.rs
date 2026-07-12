@@ -14,12 +14,12 @@ pub fn run(repository: &Repository) -> Result<(), Error> {
     match ui::select_many(app)? {
         None => println!("Cancelled."),
         Some(branches) => {
-            branches
-                .iter()
-                .for_each(|branch| match repository.delete_branch(branch) {
+            for branch in branches {
+                match repository.delete_branch(&branch) {
                     Ok(()) => println!("Deleted branch {}.", branch.name()),
                     Err(error) => println!("Failed to delete branch {}: {error}", branch.name()),
-                })
+                }
+            }
         }
     }
 
