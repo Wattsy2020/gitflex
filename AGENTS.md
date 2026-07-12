@@ -1,4 +1,5 @@
 This repository contains a collection of tools for personal use, thus the tools are quite specialised for my needs and don't need to be configurable.
+Each directory is a separate rust project, the git root directory doesn't have a Cargo.toml, look at the child projects instead.
 
 The repository is solely written in Rust. 
 Write clean and idomatic Rust code that is readable and maintainable by humans.

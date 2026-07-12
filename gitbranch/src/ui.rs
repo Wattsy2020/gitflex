@@ -115,11 +115,6 @@ impl Branch {
     }
 }
 
-enum Selection {
-    Many(Vec<LocalBranch>),
-    One(LocalBranch),
-}
-
 pub struct App {
     branches: Vec<Branch>,
     mode: Mode,
@@ -168,21 +163,19 @@ impl App {
         self.branches[position].toggle(self.mode);
     }
 
-    fn confirm_many(&self) -> Selection {
-        Selection::Many(
-            self.branches
-                .iter()
-                .filter(|branch| branch.selected)
-                .map(|branch| branch.branch.clone())
-                .collect(),
-        )
+    fn confirm_many(&self) -> Vec<LocalBranch> {
+        self.branches
+            .iter()
+            .filter(|branch| branch.selected)
+            .map(|branch| branch.branch.clone())
+            .collect()
     }
 
-    fn confirm_one(&self) -> Option<Selection> {
+    fn confirm_one(&self) -> Option<LocalBranch> {
         self.branches
             .get(self.position())
             .filter(|branch| self.mode.is_selectable(branch))
-            .map(|branch| Selection::One(branch.branch.clone()))
+            .map(|branch| branch.branch.clone())
     }
 
     fn render_branches(&self) -> List<'static> {
@@ -245,7 +238,11 @@ impl Drop for KeyboardEnhancementGuard {
     }
 }
 
-fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<Option<Selection>> {
+fn run<TOutput>(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    get_output: fn(&App) -> Option<TOutput>,
+) -> io::Result<Option<TOutput>> {
     let _keyboard_enhancements = KeyboardEnhancementGuard::try_enable();
 
     loop {
@@ -263,18 +260,14 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<Option<Selec
                 KeyCode::Char(' ') if app.mode == Mode::Clean => app.toggle(),
                 KeyCode::Enter => match app.mode {
                     Mode::Clean
-                        if key
+                        if !key
                             .modifiers
-                            .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
-                    {
-                        return Ok(Some(app.confirm_many()));
-                    }
-                    Mode::Single(_) => {
-                        if let Some(selection) = app.confirm_one() {
+                            .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) => {}
+                    Mode::Single(_) | Mode::Clean => {
+                        if let Some(selection) = get_output(app) {
                             return Ok(Some(selection));
                         }
                     }
-                    _ => {}
                 },
                 _ => {}
             }
@@ -283,28 +276,29 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<Option<Selec
 }
 
 pub fn select_many(mut app: App) -> io::Result<Option<Vec<LocalBranch>>> {
-    ratatui::run(|terminal| run(terminal, &mut app)).map(|selection| {
-        selection.map(|selection| match selection {
-            Selection::Many(branches) => branches,
-            Selection::One(_) => unreachable!("clean mode only returns multiple branches"),
+    ratatui::run(|terminal| {
+        run(terminal, &mut app, |app| {
+            // if the user didn't select anything, assume it was a mistake and stay in the TUI
+            // they can click esc to exit if they want to
+            let result = app.confirm_many();
+            if result.is_empty() {
+                None
+            } else {
+                Some(result)
+            }
         })
     })
 }
 
 pub fn select_one(mut app: App) -> io::Result<Option<LocalBranch>> {
-    ratatui::run(|terminal| run(terminal, &mut app)).map(|selection| {
-        selection.map(|selection| match selection {
-            Selection::One(branch) => branch,
-            Selection::Many(_) => unreachable!("single mode only returns one branch"),
-        })
-    })
+    ratatui::run(|terminal| run(terminal, &mut app, |app| app.confirm_one()))
 }
 
 #[cfg(test)]
 mod tests {
     use crate::git::{Checkout, LocalBranch};
 
-    use super::{App, Mode, Selection, SingleOperation};
+    use super::{App, Mode, SingleOperation};
 
     fn branch(name: &str, checkout: Checkout) -> LocalBranch {
         LocalBranch::for_test(name, checkout)
@@ -322,9 +316,7 @@ mod tests {
         )
         .unwrap();
 
-        let Selection::Many(branches) = app.confirm_many() else {
-            panic!("clean should return multiple branches");
-        };
+        let branches = app.confirm_many();
         assert_eq!(
             branches.iter().map(LocalBranch::name).collect::<Vec<_>>(),
             ["feature-a", "feature-b"]
@@ -344,7 +336,7 @@ mod tests {
         .unwrap();
         app.next();
 
-        let Some(Selection::One(branch)) = app.confirm_one() else {
+        let Some(branch) = app.confirm_one() else {
             panic!("an eligible highlighted branch should be returned");
         };
         assert_eq!(branch.name(), "feature-b");
