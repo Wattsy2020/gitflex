@@ -29,7 +29,8 @@ enum Mode {
 }
 
 impl Mode {
-    fn is_selectable(self, branch: &LocalBranch) -> bool {
+    fn is_selectable(self, branch: &Branch) -> bool {
+        let branch = &branch.branch;
         match self {
             Self::Clean => branch.is_deletable(),
             Self::Single(SingleOperation::Switch) => branch.is_switchable(),
@@ -66,7 +67,7 @@ impl Branch {
     }
 
     fn toggle(&mut self, mode: Mode) {
-        if mode.is_selectable(&self.branch) {
+        if mode.is_selectable(self) {
             self.selected = !self.selected;
         }
     }
@@ -93,7 +94,7 @@ impl Branch {
     }
 
     fn color(&self, mode: Mode, highlighted: bool) -> Color {
-        if !mode.is_selectable(&self.branch) {
+        if !mode.is_selectable(self) {
             if highlighted {
                 Color::Gray
             } else {
@@ -149,7 +150,7 @@ impl App {
     fn first_selectable(&self) -> usize {
         self.branches
             .iter()
-            .position(|branch| self.mode.is_selectable(&branch.branch))
+            .position(|branch| self.mode.is_selectable(branch))
             .unwrap_or(0)
     }
 
@@ -181,7 +182,7 @@ impl App {
     fn confirm_one(&self) -> Option<Selection> {
         self.branches
             .get(self.position())
-            .filter(|branch| self.mode.is_selectable(&branch.branch))
+            .filter(|branch| self.mode.is_selectable(branch))
             .map(|branch| Selection::One(branch.branch.clone()))
     }
 
@@ -261,19 +262,21 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<Option<Selec
                 KeyCode::Down | KeyCode::Char('j') => app.next(),
                 KeyCode::Up | KeyCode::Char('k') => app.previous(),
                 KeyCode::Char(' ') if app.mode == Mode::Clean => app.toggle(),
-                KeyCode::Enter
-                    if app.mode == Mode::Clean
-                        && key
+                KeyCode::Enter => match app.mode {
+                    Mode::Clean
+                        if key
                             .modifiers
                             .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
-                {
-                    return Ok(Some(app.confirm_many()));
-                }
-                KeyCode::Enter if matches!(app.mode, Mode::Single(_)) => {
-                    if let Some(selection) = app.confirm_one() {
-                        return Ok(Some(selection));
+                    {
+                        return Ok(Some(app.confirm_many()));
                     }
-                }
+                    Mode::Single(_) => {
+                        if let Some(selection) = app.confirm_one() {
+                            return Ok(Some(selection));
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }

@@ -1,4 +1,4 @@
-use crate::{git::Repository, ui, Error};
+use crate::{Error, git::Repository, ui};
 
 pub fn run(repository: &Repository) -> Result<(), Error> {
     let branches = repository.local_branches()?;

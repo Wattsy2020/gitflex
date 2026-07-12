@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use git2::build::CheckoutBuilder;
-use git2::{BranchType, ErrorCode, ObjectType, Repository as GitRepository};
+use git2::{Branch, BranchType, ErrorCode, ObjectType, Repository as GitRepository};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,25 +96,30 @@ impl Repository {
         Ok(branches)
     }
 
-    pub fn delete_branch(&self, branch: &LocalBranch) -> Result<(), Error> {
-        if self.checked_out_branches()?.contains(branch.name()) {
-            return Err(Error::BranchCheckedOut(branch.name.clone()));
-        }
-
-        let mut branch_to_delete = self.inner.find_branch(branch.name(), BranchType::Local)?;
-        branch_to_delete.delete().map_err(Error::from)
-    }
-
     pub fn current_branch(&self) -> Result<Option<String>, Error> {
         checked_out_branch(&self.inner)
     }
 
-    pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
+    fn find_branch(&self, branch: &LocalBranch) -> Result<Branch<'_>, Error> {
+        self.inner
+            .find_branch(branch.name(), BranchType::Local)
+            .map_err(Error::from)
+    }
+
+    fn get_non_checkedout_branch(&self, branch: &LocalBranch) -> Result<Branch<'_>, Error> {
         if self.checked_out_branches()?.contains(branch.name()) {
             return Err(Error::BranchCheckedOut(branch.name.clone()));
         }
+        self.find_branch(branch)
+    }
 
-        let branch = self.inner.find_branch(branch.name(), BranchType::Local)?;
+    pub fn delete_branch(&self, branch: &LocalBranch) -> Result<(), Error> {
+        let mut branch_to_delete = self.get_non_checkedout_branch(branch)?;
+        branch_to_delete.delete().map_err(Error::from)
+    }
+
+    pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
+        let branch = self.get_non_checkedout_branch(branch)?;
         let reference = branch.get();
         let reference_name = reference.name()?;
         let target = reference.peel(ObjectType::Commit)?;
@@ -131,7 +136,7 @@ impl Repository {
             return Err(Error::CurrentBranchAsRebaseTarget);
         }
 
-        let branch = self.inner.find_branch(branch.name(), BranchType::Local)?;
+        let branch = self.find_branch(branch)?;
         let upstream = self.inner.reference_to_annotated_commit(branch.get())?;
         let signature = self.inner.signature()?;
         let mut rebase = self.inner.rebase(None, Some(&upstream), None, None)?;
@@ -176,7 +181,7 @@ impl Repository {
             .flatten()
             .chain(main_worktree_branch)
             // if this isn't a worktree, include the checked out branch
-            .chain(checked_out_branch(&self.inner)?)
+            .chain(self.current_branch()?)
             .collect())
     }
 }

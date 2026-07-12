@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -52,7 +53,11 @@ fn run() -> Result<(), Error> {
 fn main() -> ExitCode {
     run().map_or_else(
         |error| {
-            eprintln!("{error}");
+            if std::io::stderr().is_terminal() {
+                eprintln!("{error}\r");
+            } else {
+                eprintln!("{error}");
+            }
             ExitCode::FAILURE
         },
         |()| ExitCode::SUCCESS,
