@@ -1,7 +1,7 @@
 use crate::{
     Error,
     git::{self, RebaseOutcome, Repository},
-    ui::{self, App, Mode, SingleOperation},
+    ui::{self, App, SingleOperation},
 };
 
 pub fn run(repository: &Repository) -> Result<(), Error> {
@@ -10,7 +10,7 @@ pub fn run(repository: &Repository) -> Result<(), Error> {
         .ok_or(git::Error::DetachedHead)?;
 
     let branches = repository.local_branches()?;
-    let Some(app) = App::new(branches, Mode::Single(SingleOperation::Rebase)) else {
+    let Some(app) = App::single(branches, SingleOperation::Rebase) else {
         println!("No branches available to rebase onto.");
         return Ok(());
     };

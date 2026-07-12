@@ -1,19 +1,18 @@
 use crate::{
     Error,
     git::Repository,
-    ui::{self, App, Mode},
+    ui::{self, App},
 };
 
 pub fn run(repository: &Repository) -> Result<(), Error> {
     let branches = repository.local_branches()?;
-    let Some(app) = App::new(branches, Mode::Clean) else {
+    let Some(app) = App::clean(branches) else {
         println!("No deletable branches found.");
         return Ok(());
     };
 
     match ui::select_many(app)? {
         None => println!("Cancelled."),
-        Some(branches) if branches.is_empty() => println!("No branches selected."),
         Some(branches) => {
             branches
                 .iter()

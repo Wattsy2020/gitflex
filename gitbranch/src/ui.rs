@@ -22,33 +22,115 @@ pub enum SingleOperation {
     Rebase,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Mode {
-    Clean,
-    Single(SingleOperation),
+pub struct CleanMode;
+
+pub struct SingleMode {
+    operation: SingleOperation,
 }
 
-impl Mode {
-    fn is_selectable(self, branch: &Branch) -> bool {
-        let branch = &branch.branch;
-        match self {
-            Self::Clean => branch.is_deletable(),
-            Self::Single(SingleOperation::Switch) => branch.is_switchable(),
-            Self::Single(SingleOperation::Rebase) => branch.is_rebase_target(),
+trait Mode {
+    type Output;
+
+    fn is_selectable(&self, branch: &LocalBranch) -> bool;
+    fn initially_selected(&self, branch: &LocalBranch) -> bool;
+    fn marker(&self, branch: &Branch) -> &'static str;
+    fn is_selected(&self, branch: &Branch) -> bool;
+    fn toggle(&self, branch: &mut Branch);
+    fn confirms(&self, modifiers: KeyModifiers) -> bool;
+    fn output(&self, branches: &[Branch], position: usize) -> Option<Self::Output>;
+    fn help(&self) -> &'static str;
+}
+
+impl Mode for CleanMode {
+    type Output = Vec<LocalBranch>;
+
+    fn is_selectable(&self, branch: &LocalBranch) -> bool {
+        branch.is_deletable()
+    }
+
+    fn initially_selected(&self, branch: &LocalBranch) -> bool {
+        branch.is_deletable()
+    }
+
+    fn marker(&self, branch: &Branch) -> &'static str {
+        if !branch.branch.is_deletable() {
+            "[-] "
+        } else if branch.selected {
+            "[x] "
+        } else {
+            "[ ] "
         }
     }
 
-    fn help(self) -> &'static str {
-        match self {
-            Self::Clean => {
-                "↑/↓ navigate   space toggle   cmd/ctrl+enter delete selected   q/esc quit"
-            }
-            Self::Single(SingleOperation::Switch) => {
-                "↑/↓ navigate   enter switch to branch   q/esc quit"
-            }
-            Self::Single(SingleOperation::Rebase) => {
-                "↑/↓ navigate   enter rebase onto branch   q/esc quit"
-            }
+    fn is_selected(&self, branch: &Branch) -> bool {
+        branch.selected
+    }
+
+    fn toggle(&self, branch: &mut Branch) {
+        if self.is_selectable(&branch.branch) {
+            branch.selected = !branch.selected;
+        }
+    }
+
+    fn confirms(&self, modifiers: KeyModifiers) -> bool {
+        modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
+    }
+
+    fn output(&self, branches: &[Branch], _position: usize) -> Option<Self::Output> {
+        let branches = branches
+            .iter()
+            .filter(|branch| branch.selected)
+            .map(|branch| branch.branch.clone())
+            .collect::<Vec<_>>();
+
+        // An empty selection is assumed to be accidental; Escape remains available to cancel.
+        (!branches.is_empty()).then_some(branches)
+    }
+
+    fn help(&self) -> &'static str {
+        "↑/↓ navigate   space toggle   cmd/ctrl+enter delete selected   q/esc quit"
+    }
+}
+
+impl Mode for SingleMode {
+    type Output = LocalBranch;
+
+    fn is_selectable(&self, branch: &LocalBranch) -> bool {
+        match self.operation {
+            SingleOperation::Switch => branch.is_switchable(),
+            SingleOperation::Rebase => branch.is_rebase_target(),
+        }
+    }
+
+    fn initially_selected(&self, _branch: &LocalBranch) -> bool {
+        false
+    }
+
+    fn marker(&self, _branch: &Branch) -> &'static str {
+        ""
+    }
+
+    fn is_selected(&self, _branch: &Branch) -> bool {
+        false
+    }
+
+    fn toggle(&self, _branch: &mut Branch) {}
+
+    fn confirms(&self, _modifiers: KeyModifiers) -> bool {
+        true
+    }
+
+    fn output(&self, branches: &[Branch], position: usize) -> Option<Self::Output> {
+        branches
+            .get(position)
+            .filter(|branch| self.is_selectable(&branch.branch))
+            .map(|branch| branch.branch.clone())
+    }
+
+    fn help(&self) -> &'static str {
+        match self.operation {
+            SingleOperation::Switch => "↑/↓ navigate   enter switch to branch   q/esc quit",
+            SingleOperation::Rebase => "↑/↓ navigate   enter rebase onto branch   q/esc quit",
         }
     }
 }
@@ -59,31 +141,15 @@ struct Branch {
 }
 
 impl Branch {
-    fn new(branch: LocalBranch, mode: Mode) -> Self {
+    fn new<M: Mode>(branch: LocalBranch, mode: &M) -> Self {
         Self {
-            selected: mode == Mode::Clean && branch.is_deletable(),
+            selected: mode.initially_selected(&branch),
             branch,
         }
     }
 
-    fn toggle(&mut self, mode: Mode) {
-        if mode.is_selectable(self) {
-            self.selected = !self.selected;
-        }
-    }
-
-    fn branch_text(&self, mode: Mode) -> String {
-        let marker = match mode {
-            Mode::Clean if self.branch.is_deletable() => {
-                if self.selected {
-                    "[x] "
-                } else {
-                    "[ ] "
-                }
-            }
-            Mode::Clean => "[-] ",
-            Mode::Single(_) => "",
-        };
+    fn branch_text<M: Mode>(&self, mode: &M) -> String {
+        let marker = mode.marker(self);
         let status = match self.branch.checkout() {
             Checkout::Available => "",
             Checkout::CurrentWorktree => " (current)",
@@ -93,21 +159,21 @@ impl Branch {
         format!("{marker}{}{status}", self.branch.name())
     }
 
-    fn color(&self, mode: Mode, highlighted: bool) -> Color {
-        if !mode.is_selectable(self) {
+    fn color<M: Mode>(&self, mode: &M, highlighted: bool) -> Color {
+        if !mode.is_selectable(&self.branch) {
             if highlighted {
                 Color::Gray
             } else {
                 Color::DarkGray
             }
-        } else if mode == Mode::Clean && self.selected {
+        } else if mode.is_selected(self) {
             Color::Red
         } else {
             Color::Gray
         }
     }
 
-    fn render(&self, mode: Mode, highlighted: bool) -> ListItem<'static> {
+    fn render<M: Mode>(&self, mode: &M, highlighted: bool) -> ListItem<'static> {
         ListItem::new(Line::from(Span::styled(
             self.branch_text(mode),
             Style::default().fg(self.color(mode, highlighted)),
@@ -115,17 +181,32 @@ impl Branch {
     }
 }
 
-pub struct App {
+pub struct App<M> {
     branches: Vec<Branch>,
-    mode: Mode,
+    mode: M,
     state: ListState,
 }
 
-impl App {
-    pub fn new(branches: Vec<LocalBranch>, mode: Mode) -> Option<Self> {
+impl App<CleanMode> {
+    pub fn clean(branches: Vec<LocalBranch>) -> Option<Self> {
+        Self::new(branches, CleanMode)
+    }
+}
+
+impl App<SingleMode> {
+    pub fn single(branches: Vec<LocalBranch>, operation: SingleOperation) -> Option<Self> {
+        Self::new(branches, SingleMode { operation })
+    }
+}
+
+impl<M> App<M> {
+    fn new(branches: Vec<LocalBranch>, mode: M) -> Option<Self>
+    where
+        M: Mode,
+    {
         let branches = branches
             .into_iter()
-            .map(|branch| Branch::new(branch, mode))
+            .map(|branch| Branch::new(branch, &mode))
             .collect();
         let mut app = Self {
             branches,
@@ -142,10 +223,13 @@ impl App {
             .expect("a list element is always selected")
     }
 
-    fn first_selectable(&self) -> Option<usize> {
+    fn first_selectable(&self) -> Option<usize>
+    where
+        M: Mode,
+    {
         self.branches
             .iter()
-            .position(|branch| self.mode.is_selectable(branch))
+            .position(|branch| self.mode.is_selectable(&branch.branch))
     }
 
     fn next(&mut self) {
@@ -158,32 +242,30 @@ impl App {
         self.state.select(Some(position));
     }
 
-    fn toggle(&mut self) {
+    fn toggle(&mut self)
+    where
+        M: Mode,
+    {
         let position = self.position();
-        self.branches[position].toggle(self.mode);
+        self.mode.toggle(&mut self.branches[position]);
     }
 
-    fn confirm_many(&self) -> Vec<LocalBranch> {
-        self.branches
-            .iter()
-            .filter(|branch| branch.selected)
-            .map(|branch| branch.branch.clone())
-            .collect()
+    fn output(&self) -> Option<M::Output>
+    where
+        M: Mode,
+    {
+        self.mode.output(&self.branches, self.position())
     }
 
-    fn confirm_one(&self) -> Option<LocalBranch> {
-        self.branches
-            .get(self.position())
-            .filter(|branch| self.mode.is_selectable(branch))
-            .map(|branch| branch.branch.clone())
-    }
-
-    fn render_branches(&self) -> List<'static> {
+    fn render_branches(&self) -> List<'static>
+    where
+        M: Mode,
+    {
         let items = self
             .branches
             .iter()
             .enumerate()
-            .map(|(index, branch)| branch.render(self.mode, self.position() == index))
+            .map(|(index, branch)| branch.render(&self.mode, self.position() == index))
             .collect::<Vec<_>>();
 
         List::new(items)
@@ -196,7 +278,10 @@ impl App {
             .highlight_symbol("> ")
     }
 
-    fn draw(&mut self, frame: &mut Frame) {
+    fn draw(&mut self, frame: &mut Frame)
+    where
+        M: Mode,
+    {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(3)])
@@ -238,11 +323,7 @@ impl Drop for KeyboardEnhancementGuard {
     }
 }
 
-fn run<TOutput>(
-    terminal: &mut DefaultTerminal,
-    app: &mut App,
-    get_output: fn(&App) -> Option<TOutput>,
-) -> io::Result<Option<TOutput>> {
+fn run<M: Mode>(terminal: &mut DefaultTerminal, app: &mut App<M>) -> io::Result<Option<M::Output>> {
     let _keyboard_enhancements = KeyboardEnhancementGuard::try_enable();
 
     loop {
@@ -257,48 +338,31 @@ fn run<TOutput>(
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
                 KeyCode::Down | KeyCode::Char('j') => app.next(),
                 KeyCode::Up | KeyCode::Char('k') => app.previous(),
-                KeyCode::Char(' ') if app.mode == Mode::Clean => app.toggle(),
-                KeyCode::Enter => match app.mode {
-                    Mode::Clean
-                        if !key
-                            .modifiers
-                            .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) => {}
-                    Mode::Single(_) | Mode::Clean => {
-                        if let Some(selection) = get_output(app) {
-                            return Ok(Some(selection));
-                        }
+                KeyCode::Char(' ') => app.toggle(),
+                KeyCode::Enter if app.mode.confirms(key.modifiers) => {
+                    if let Some(selection) = app.output() {
+                        return Ok(Some(selection));
                     }
-                },
+                }
                 _ => {}
             }
         }
     }
 }
 
-pub fn select_many(mut app: App) -> io::Result<Option<Vec<LocalBranch>>> {
-    ratatui::run(|terminal| {
-        run(terminal, &mut app, |app| {
-            // if the user didn't select anything, assume it was a mistake and stay in the TUI
-            // they can click esc to exit if they want to
-            let result = app.confirm_many();
-            if result.is_empty() {
-                None
-            } else {
-                Some(result)
-            }
-        })
-    })
+pub fn select_many(mut app: App<CleanMode>) -> io::Result<Option<Vec<LocalBranch>>> {
+    ratatui::run(|terminal| run(terminal, &mut app))
 }
 
-pub fn select_one(mut app: App) -> io::Result<Option<LocalBranch>> {
-    ratatui::run(|terminal| run(terminal, &mut app, |app| app.confirm_one()))
+pub fn select_one(mut app: App<SingleMode>) -> io::Result<Option<LocalBranch>> {
+    ratatui::run(|terminal| run(terminal, &mut app))
 }
 
 #[cfg(test)]
 mod tests {
     use crate::git::{Checkout, LocalBranch};
 
-    use super::{App, Mode, SingleOperation};
+    use super::{App, SingleOperation};
 
     fn branch(name: &str, checkout: Checkout) -> LocalBranch {
         LocalBranch::for_test(name, checkout)
@@ -306,17 +370,14 @@ mod tests {
 
     #[test]
     fn clean_starts_with_every_deletable_branch_selected() {
-        let app = App::new(
-            vec![
-                branch("feature-a", Checkout::Available),
-                branch("feature-b", Checkout::Available),
-                branch("main", Checkout::CurrentWorktree),
-            ],
-            Mode::Clean,
-        )
+        let app = App::clean(vec![
+            branch("feature-a", Checkout::Available),
+            branch("feature-b", Checkout::Available),
+            branch("main", Checkout::CurrentWorktree),
+        ])
         .unwrap();
 
-        let branches = app.confirm_many();
+        let branches = app.output().unwrap();
         assert_eq!(
             branches.iter().map(LocalBranch::name).collect::<Vec<_>>(),
             ["feature-a", "feature-b"]
@@ -325,18 +386,18 @@ mod tests {
 
     #[test]
     fn single_selection_returns_only_the_highlighted_branch() {
-        let mut app = App::new(
+        let mut app = App::single(
             vec![
                 branch("feature-a", Checkout::Available),
                 branch("feature-b", Checkout::Available),
                 branch("main", Checkout::CurrentWorktree),
             ],
-            Mode::Single(SingleOperation::Rebase),
+            SingleOperation::Rebase,
         )
         .unwrap();
         app.next();
 
-        let Some(branch) = app.confirm_one() else {
+        let Some(branch) = app.output() else {
             panic!("an eligible highlighted branch should be returned");
         };
         assert_eq!(branch.name(), "feature-b");
@@ -344,16 +405,16 @@ mod tests {
 
     #[test]
     fn single_selection_rejects_an_ineligible_highlighted_branch() {
-        let mut app = App::new(
+        let mut app = App::single(
             vec![
                 branch("feature", Checkout::Available),
                 branch("main", Checkout::CurrentWorktree),
             ],
-            Mode::Single(SingleOperation::Switch),
+            SingleOperation::Switch,
         )
         .unwrap();
         app.next();
 
-        assert!(app.confirm_one().is_none());
+        assert!(app.output().is_none());
     }
 }
