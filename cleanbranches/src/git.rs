@@ -1,8 +1,7 @@
-use std::error::Error as StdError;
-use std::fmt;
 use std::path::Path;
 
 use git2::{BranchType, Repository as GitRepository};
+use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalBranch {
@@ -30,21 +29,18 @@ fn new_repository(repository: GitRepository) -> Repository {
 
 impl Repository {
     pub fn discover(path: impl AsRef<Path>) -> Result<Self, Error> {
-        git2::Repository::discover(path)
-            .map(new_repository)
-            .map_err(Error::Discover)
+        let repository = git2::Repository::discover(path)?;
+        Ok(new_repository(repository))
     }
 
     pub fn local_branches(&self) -> Result<Vec<LocalBranch>, Error> {
         let mut branches = self
             .inner
-            .branches(Some(BranchType::Local))
-            .map_err(Error::ListBranches)?
+            .branches(Some(BranchType::Local))?
             .map(|branch| {
-                let (branch, _) = branch.map_err(Error::ListBranches)?;
+                let (branch, _) = branch?;
                 branch
-                    .name()
-                    .map_err(Error::ListBranches)?
+                    .name()?
                     .ok_or(Error::InvalidBranchName)
                     .map(|name| LocalBranch {
                         name: name.to_string(),
@@ -58,58 +54,17 @@ impl Repository {
     }
 
     pub fn delete_branch(&self, branch: &LocalBranch) -> Result<(), Error> {
-        let mut branch_to_delete = self
-            .inner
-            .find_branch(branch.name(), BranchType::Local)
-            .map_err(|source| Error::FindBranch {
-                name: branch.name.clone(),
-                source,
-            })?;
-
-        branch_to_delete
-            .delete()
-            .map_err(|source| Error::DeleteBranch {
-                name: branch.name.clone(),
-                source,
-            })
+        let mut branch_to_delete = self.inner.find_branch(branch.name(), BranchType::Local)?;
+        branch_to_delete.delete().map_err(Error::from)
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
-    Discover(git2::Error),
-    ListBranches(git2::Error),
+    #[error(transparent)]
+    Git(#[from] git2::Error),
+    #[error("branch name is not valid UTF-8")]
     InvalidBranchName,
-    FindBranch { name: String, source: git2::Error },
-    DeleteBranch { name: String, source: git2::Error },
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Discover(source) => write!(formatter, "failed to discover repository: {source}"),
-            Self::ListBranches(source) => write!(formatter, "failed to list branches: {source}"),
-            Self::InvalidBranchName => write!(formatter, "branch name is not valid UTF-8"),
-            Self::FindBranch { name, source } => {
-                write!(formatter, "could not find {name}: {source}")
-            }
-            Self::DeleteBranch { name, source } => {
-                write!(formatter, "could not delete {name}: {source}")
-            }
-        }
-    }
-}
-
-impl StdError for Error {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match self {
-            Self::Discover(source)
-            | Self::ListBranches(source)
-            | Self::FindBranch { source, .. }
-            | Self::DeleteBranch { source, .. } => Some(source),
-            Self::InvalidBranchName => None,
-        }
-    }
 }
 
 #[cfg(test)]
