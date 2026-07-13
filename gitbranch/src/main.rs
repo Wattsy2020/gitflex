@@ -19,6 +19,8 @@ enum Command {
     Switch,
     /// Select a local branch to rebase the current branch onto
     Rebase,
+    /// Select a local branch to merge into the current branch
+    Merge,
 }
 
 fn run() -> Result<(), gitbranch::Error> {
@@ -29,6 +31,7 @@ fn run() -> Result<(), gitbranch::Error> {
         Command::Clean => gitbranch::run_clean(&repository)?,
         Command::Switch => gitbranch::run_switch(&repository)?,
         Command::Rebase => gitbranch::run_rebase(&repository)?,
+        Command::Merge => gitbranch::run_merge(&repository)?,
     }
 
     Ok(())

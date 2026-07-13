@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use gitbranch::git::{Checkout, Error, LocalBranch, RebaseOutcome, Repository};
+use gitbranch::git::{Checkout, Error, LocalBranch, MergeOutcome, RebaseOutcome, Repository};
 use tempfile::TempDir;
 
 struct TestRepository {
@@ -222,6 +222,102 @@ fn switches_to_branch_created_by_git_cli() {
     assert_eq!(
         test_repository.git_stdout(&["show", "HEAD:feature.txt"]),
         "feature"
+    );
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
+}
+
+#[test]
+fn merges_diverged_branch_into_state_validated_by_git_cli() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature");
+    let feature_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
+    test_repository.switch_to("main");
+    test_repository.commit_file("main.txt", "main\n", "Add main change");
+    let old_main_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
+    let repository = test_repository.discover();
+
+    let outcome = repository
+        .merge_from(&branch(&repository, "feature"))
+        .expect("merge should succeed");
+
+    assert_eq!(outcome, MergeOutcome::Completed);
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "main"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["rev-parse", "main^1"]),
+        old_main_tip
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["rev-parse", "main^2"]),
+        feature_tip
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["show", "main:main.txt"]),
+        "main"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["show", "main:feature.txt"]),
+        "feature"
+    );
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
+}
+
+#[test]
+fn conflicted_merge_can_be_continued_by_git_cli() {
+    let test_repository = TestRepository::new();
+    test_repository.commit_file("shared.txt", "base\n", "Add shared file");
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("shared.txt", "feature\n", "Update shared file on feature");
+    test_repository.switch_to("main");
+    test_repository.commit_file("shared.txt", "main\n", "Update shared file on main");
+    let repository = test_repository.discover();
+
+    let outcome = repository
+        .merge_from(&branch(&repository, "feature"))
+        .expect("conflict should be returned as an outcome");
+    assert_eq!(outcome, MergeOutcome::Conflicted);
+    assert!(
+        !test_repository
+            .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
+            .is_empty()
+    );
+    test_repository.git_success(&["rev-parse", "--verify", "MERGE_HEAD"]);
+
+    fs::write(test_repository.path.join("shared.txt"), "resolved\n")
+        .expect("conflict resolution should be written");
+    test_repository.git_success(&["add", "--", "shared.txt"]);
+    let output = test_repository
+        .command_at(&test_repository.path)
+        .env("GIT_EDITOR", "true")
+        .args(["merge", "--continue"])
+        .output()
+        .expect("git should be available on PATH");
+    assert_success(&["merge", "--continue"], &output);
+
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "main"
+    );
+    assert_success(
+        &["merge-base", "--is-ancestor", "feature", "main"],
+        &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["show", "main:shared.txt"]),
+        "resolved"
     );
     assert!(
         test_repository

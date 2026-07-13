@@ -20,6 +20,7 @@ use crate::git::{Checkout, LocalBranch};
 pub enum SingleOperation {
     Switch,
     Rebase,
+    Merge,
 }
 
 pub struct CleanMode;
@@ -121,6 +122,7 @@ impl Mode for SingleMode {
         match self.operation {
             SingleOperation::Switch => branch.is_switchable(),
             SingleOperation::Rebase => branch.is_rebase_target(),
+            SingleOperation::Merge => branch.is_merge_source(),
         }
     }
 
@@ -153,6 +155,7 @@ impl Mode for SingleMode {
         match self.operation {
             SingleOperation::Switch => "↑/↓ navigate   enter switch to branch   q/esc quit",
             SingleOperation::Rebase => "↑/↓ navigate   enter rebase onto branch   q/esc quit",
+            SingleOperation::Merge => "↑/↓ navigate   enter merge branch   q/esc quit",
         }
     }
 }
@@ -506,6 +509,23 @@ mod tests {
             app.update(Action::Confirm(Confirmation::Plain)),
             Transition::Continue
         );
+    }
+
+    #[test]
+    fn merge_selects_a_branch_checked_out_in_another_worktree() {
+        let mut app = App::single(
+            vec![
+                branch("main", Checkout::CurrentWorktree),
+                branch("feature", Checkout::OtherWorktree),
+            ],
+            SingleOperation::Merge,
+        )
+        .unwrap();
+
+        let Transition::Complete(branch) = app.update(Action::Confirm(Confirmation::Plain)) else {
+            panic!("a branch in another worktree should be a merge source");
+        };
+        assert_eq!(branch.name(), "feature");
     }
 
     #[test]

@@ -51,12 +51,28 @@ impl LocalBranch {
     pub fn is_rebase_target(&self) -> bool {
         self.checkout != Checkout::CurrentWorktree
     }
+
+    pub fn is_merge_source(&self) -> bool {
+        self.checkout != Checkout::CurrentWorktree
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RebaseOutcome {
     Completed,
     Conflicted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MergeOutcome {
+    Completed,
+    Conflicted,
+}
+
+enum GitOperationOutcome {
+    Completed,
+    Conflicted,
+    Failed { status: ExitStatus, message: String },
 }
 
 pub struct Repository {
@@ -152,21 +168,30 @@ impl Repository {
         let branch = self.find_branch(branch)?;
         let target = branch.get().name()?.to_string();
         let worktree = self.inner.workdir().ok_or(Error::BareRepository)?;
-        let had_conflicts = GitRepository::open(worktree)?.index()?.has_conflicts();
-        let output = Command::new("git")
-            .args(["rebase", &target])
-            .current_dir(worktree)
-            .output()?;
+        match run_git_operation(worktree, ["rebase", &target])? {
+            GitOperationOutcome::Completed => Ok(RebaseOutcome::Completed),
+            GitOperationOutcome::Conflicted => Ok(RebaseOutcome::Conflicted),
+            GitOperationOutcome::Failed { status, message } => {
+                Err(Error::RebaseFailed { status, message })
+            }
+        }
+    }
 
-        if output.status.success() {
-            Ok(RebaseOutcome::Completed)
-        } else if !had_conflicts && GitRepository::open(worktree)?.index()?.has_conflicts() {
-            Ok(RebaseOutcome::Conflicted)
-        } else {
-            Err(Error::RebaseFailed {
-                status: output.status,
-                message: command_message(&output.stdout, &output.stderr),
-            })
+    pub fn merge_from(&self, branch: &LocalBranch) -> Result<MergeOutcome, Error> {
+        let current_branch = self.current_branch()?.ok_or(Error::DetachedHeadForMerge)?;
+        if current_branch == branch.name() {
+            return Err(Error::CurrentBranchAsMergeSource);
+        }
+
+        let branch = self.find_branch(branch)?;
+        let source = branch.get().name()?.to_string();
+        let worktree = self.inner.workdir().ok_or(Error::BareRepositoryForMerge)?;
+        match run_git_operation(worktree, ["merge", "--no-edit", &source])? {
+            GitOperationOutcome::Completed => Ok(MergeOutcome::Completed),
+            GitOperationOutcome::Conflicted => Ok(MergeOutcome::Conflicted),
+            GitOperationOutcome::Failed { status, message } => {
+                Err(Error::MergeFailed { status, message })
+            }
         }
     }
 
@@ -205,6 +230,32 @@ fn checked_out_branch(repository: &GitRepository) -> Result<Option<String>, Erro
     }
 }
 
+fn run_git_operation<'a>(
+    worktree: &Path,
+    arguments: impl IntoIterator<Item = &'a str>,
+) -> Result<GitOperationOutcome, Error> {
+    let had_conflicts = has_conflicts(worktree)?;
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(worktree)
+        .output()?;
+
+    if output.status.success() {
+        Ok(GitOperationOutcome::Completed)
+    } else if !had_conflicts && has_conflicts(worktree)? {
+        Ok(GitOperationOutcome::Conflicted)
+    } else {
+        Ok(GitOperationOutcome::Failed {
+            status: output.status,
+            message: command_message(&output.stdout, &output.stderr),
+        })
+    }
+}
+
+fn has_conflicts(worktree: &Path) -> Result<bool, Error> {
+    Ok(GitRepository::open(worktree)?.index()?.has_conflicts())
+}
+
 fn command_message(stdout: &[u8], stderr: &[u8]) -> String {
     [stderr, stdout]
         .into_iter()
@@ -240,6 +291,18 @@ pub enum Error {
         "rebase stopped due to conflicts; resolve them and run `git rebase --continue`, or run `git rebase --abort`"
     )]
     RebaseConflicts,
+    #[error("cannot merge while HEAD is detached")]
+    DetachedHeadForMerge,
+    #[error("the current branch cannot be merged into itself")]
+    CurrentBranchAsMergeSource,
+    #[error("cannot merge in a bare repository")]
+    BareRepositoryForMerge,
+    #[error("git merge failed with {status}: {message}")]
+    MergeFailed { status: ExitStatus, message: String },
+    #[error(
+        "merge stopped due to conflicts; resolve them and run `git merge --continue`, or run `git merge --abort`"
+    )]
+    MergeConflicts,
 }
 
 #[cfg(test)]
@@ -253,7 +316,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use super::{Checkout, Error, RebaseOutcome, Repository};
+    use super::{Checkout, Error, MergeOutcome, RebaseOutcome, Repository};
 
     fn repository_with_branches() -> (TempDir, GitRepository) {
         let directory = TempDir::new().expect("temporary directory should be created");
@@ -613,6 +676,89 @@ mod tests {
                 .expect("working-tree file should remain"),
             "working tree\n"
         );
+    }
+
+    #[test]
+    fn fast_forward_merges_source_into_current_branch() {
+        let (directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        let feature_tip = commit_file(
+            &repository,
+            "refs/heads/feature",
+            initial,
+            "feature.txt",
+            "feature\n",
+        );
+        let repository = Repository::new(repository);
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+
+        let outcome = repository
+            .merge_from(&feature)
+            .expect("merge should succeed");
+
+        assert_eq!(outcome, MergeOutcome::Completed);
+        assert_eq!(
+            repository.inner.head().expect("HEAD should exist").target(),
+            Some(feature_tip)
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("feature.txt"))
+                .expect("merged file should be checked out"),
+            "feature\n"
+        );
+    }
+
+    #[test]
+    fn refuses_to_merge_current_branch_into_itself() {
+        let (_directory, repository) = repository_with_branches();
+        let repository = Repository::new(repository);
+        let main = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "main")
+            .expect("main branch should exist");
+
+        let error = repository
+            .merge_from(&main)
+            .expect_err("current branch should not be merged into itself");
+
+        assert!(matches!(error, Error::CurrentBranchAsMergeSource));
+    }
+
+    #[test]
+    fn refuses_to_merge_with_detached_head() {
+        let (_directory, repository) = repository_with_branches();
+        let head = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        repository
+            .set_head_detached(head)
+            .expect("HEAD should detach");
+        let repository = Repository::new(repository);
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+
+        let error = repository
+            .merge_from(&feature)
+            .expect_err("merge should require a current branch");
+
+        assert!(matches!(error, Error::DetachedHeadForMerge));
     }
 
     #[test]

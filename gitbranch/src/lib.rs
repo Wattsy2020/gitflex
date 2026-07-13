@@ -2,6 +2,7 @@ use thiserror::Error;
 
 mod clean;
 pub mod git;
+mod merge;
 mod rebase;
 mod switch;
 mod ui;
@@ -26,4 +27,8 @@ pub fn run_switch(repository: &Repository) -> Result<(), Error> {
 
 pub fn run_rebase(repository: &Repository) -> Result<(), Error> {
     rebase::run(repository)
+}
+
+pub fn run_merge(repository: &Repository) -> Result<(), Error> {
+    merge::run(repository)
 }
