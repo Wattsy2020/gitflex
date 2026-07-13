@@ -1,8 +1,9 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 
 use git2::build::CheckoutBuilder;
-use git2::{Branch, BranchType, ErrorCode, ObjectType, Repository as GitRepository};
+use git2::{Branch, BranchType, ErrorCode, ObjectType, Oid, Repository as GitRepository, Time};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,9 +141,21 @@ impl Repository {
         let upstream = self.inner.reference_to_annotated_commit(branch.get())?;
         let signature = self.inner.signature()?;
         let mut rebase = self.inner.rebase(None, Some(&upstream), None, None)?;
+        let operations = (0..rebase.len())
+            .map(|index| {
+                rebase
+                    .nth(index)
+                    .map(|operation| operation.id())
+                    .ok_or(Error::InvalidRebaseState)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
 
         while rebase.next().transpose()?.is_some() {
             if self.inner.index()?.has_conflicts() {
+                let current = rebase
+                    .operation_current()
+                    .ok_or(Error::InvalidRebaseState)?;
+                self.write_git_rebase_continuation(&operations, current)?;
                 return Ok(RebaseOutcome::Conflicted);
             }
             rebase.commit(None, &signature, None)?;
@@ -150,6 +163,43 @@ impl Repository {
 
         rebase.finish(Some(&signature))?;
         Ok(RebaseOutcome::Completed)
+    }
+
+    fn write_git_rebase_continuation(
+        &self,
+        operations: &[Oid],
+        current: usize,
+    ) -> Result<(), Error> {
+        let current_id = operations
+            .get(current)
+            .copied()
+            .ok_or(Error::InvalidRebaseState)?;
+        let current_commit = self.inner.find_commit(current_id)?;
+        let author = current_commit.author();
+        let rebase_directory = self.inner.path().join("rebase-merge");
+
+        fs::write(
+            rebase_directory.join("done"),
+            rebase_commands(&operations[..=current]),
+        )?;
+        fs::write(
+            rebase_directory.join("git-rebase-todo"),
+            rebase_commands(&operations[current + 1..]),
+        )?;
+        fs::write(
+            rebase_directory.join("stopped-sha"),
+            format!("{current_id}\n"),
+        )?;
+        fs::write(
+            rebase_directory.join("message"),
+            current_commit.message_bytes(),
+        )?;
+        fs::write(
+            rebase_directory.join("author-script"),
+            author_script(author.name()?, author.email()?, author.when()),
+        )?;
+
+        Ok(())
     }
 
     fn checked_out_branches(&self) -> Result<HashSet<String>, Error> {
@@ -187,10 +237,44 @@ fn checked_out_branch(repository: &GitRepository) -> Result<Option<String>, Erro
     }
 }
 
+fn rebase_commands(commits: &[Oid]) -> String {
+    commits
+        .iter()
+        .map(|commit| format!("pick {commit}\n"))
+        .collect()
+}
+
+fn author_script(name: &str, email: &str, time: Time) -> String {
+    format!(
+        "GIT_AUTHOR_NAME={}\nGIT_AUTHOR_EMAIL={}\nGIT_AUTHOR_DATE={}\n",
+        shell_quote(name),
+        shell_quote(email),
+        shell_quote(&git_date(time)),
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn git_date(time: Time) -> String {
+    let offset = time.offset_minutes();
+    let sign = if offset < 0 { '-' } else { '+' };
+    let offset = offset.abs();
+    format!(
+        "@{} {sign}{:02}{:02}",
+        time.seconds(),
+        offset / 60,
+        offset % 60
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error(transparent)]
     Git(#[from] git2::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("branch name is not valid UTF-8")]
     InvalidBranchName,
     #[error("worktree name is not valid UTF-8")]
@@ -201,6 +285,8 @@ pub enum Error {
     DetachedHead,
     #[error("the current branch cannot be its own rebase target")]
     CurrentBranchAsRebaseTarget,
+    #[error("the repository contains invalid rebase state")]
+    InvalidRebaseState,
     #[error(
         "rebase stopped due to conflicts; resolve them and run `git rebase --continue`, or run `git rebase --abort`"
     )]

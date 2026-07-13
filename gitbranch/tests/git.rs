@@ -1,0 +1,350 @@
+/// Tests how the git.rs module interoperates with the git CLI
+/// The git CLI sometimes has differing behaviour to libgit2,
+/// such as writing a .git/rebase-merge/git-rebase-todo for conflicting rebases
+///
+/// Tests should set up the repository with the git CLI,
+/// perform an operation with the git module,
+/// then validate the results with the git CLI
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use gitbranch::git::{Checkout, Error, LocalBranch, RebaseOutcome, Repository};
+use tempfile::TempDir;
+
+struct TestRepository {
+    directory: TempDir,
+    path: PathBuf,
+    home: PathBuf,
+}
+
+impl TestRepository {
+    fn new() -> Self {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let path = directory.path().join("repository");
+        let home = directory.path().join("home");
+        let hooks = directory.path().join("hooks");
+        fs::create_dir_all(&home).expect("temporary home should be created");
+        fs::create_dir_all(&hooks).expect("empty hooks directory should be created");
+
+        let repository = Self {
+            directory,
+            path,
+            home,
+        };
+        let path = repository
+            .path
+            .to_str()
+            .expect("path should be valid UTF-8");
+        repository.git_success_at(
+            repository.directory.path(),
+            &["init", "--initial-branch=main", path],
+        );
+        repository.git_success(&["config", "user.name", "Git Branch Tests"]);
+        repository.git_success(&["config", "user.email", "gitbranch@example.com"]);
+        repository.git_success(&["config", "commit.gpgSign", "false"]);
+        repository.git_success(&["config", "core.autocrlf", "false"]);
+        repository.git_success(&[
+            "config",
+            "core.hooksPath",
+            hooks.to_str().expect("path should be valid UTF-8"),
+        ]);
+        repository.git_success(&["commit", "--allow-empty", "-m", "Initial commit"]);
+
+        repository
+    }
+
+    fn command_at(&self, path: &Path) -> Command {
+        let mut command = Command::new("git");
+        command
+            .current_dir(path)
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", &self.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        command
+    }
+
+    fn git_at(&self, path: &Path, arguments: &[&str]) -> Output {
+        self.command_at(path)
+            .args(arguments)
+            .output()
+            .expect("git should be available on PATH")
+    }
+
+    fn git(&self, arguments: &[&str]) -> Output {
+        self.git_at(&self.path, arguments)
+    }
+
+    fn git_success_at(&self, path: &Path, arguments: &[&str]) -> Output {
+        let output = self.git_at(path, arguments);
+        assert_success(arguments, &output);
+        output
+    }
+
+    fn git_success(&self, arguments: &[&str]) -> Output {
+        self.git_success_at(&self.path, arguments)
+    }
+
+    fn git_stdout_at(&self, path: &Path, arguments: &[&str]) -> String {
+        let output = self.git_success_at(path, arguments);
+        String::from_utf8(output.stdout)
+            .expect("git output should be valid UTF-8")
+            .trim()
+            .to_string()
+    }
+
+    fn git_stdout(&self, arguments: &[&str]) -> String {
+        self.git_stdout_at(&self.path, arguments)
+    }
+
+    fn create_branch(&self, name: &str) {
+        self.git_success(&["branch", name]);
+    }
+
+    fn switch_to(&self, name: &str) {
+        self.git_success(&["switch", name]);
+    }
+
+    fn commit_file(&self, path: &str, contents: &str, message: &str) {
+        fs::write(self.path.join(path), contents).expect("file should be written");
+        self.git_success(&["add", "--", path]);
+        self.git_success(&["commit", "-m", message]);
+    }
+
+    fn discover(&self) -> Repository {
+        Repository::discover(&self.path).expect("repository should be discovered")
+    }
+
+    fn worktree_path(&self) -> PathBuf {
+        self.directory.path().join("feature-worktree")
+    }
+}
+
+fn assert_success(arguments: &[&str], output: &Output) {
+    assert!(
+        output.status.success(),
+        "git {} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        arguments.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn branch(repository: &Repository, name: &str) -> LocalBranch {
+    repository
+        .local_branches()
+        .expect("branches should be listed")
+        .into_iter()
+        .find(|branch| branch.name() == name)
+        .unwrap_or_else(|| panic!("branch {name} should exist"))
+}
+
+#[test]
+fn deletes_branch_created_by_git_cli() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    let repository = test_repository.discover();
+
+    repository
+        .delete_branch(&branch(&repository, "feature"))
+        .expect("feature branch should be deleted");
+
+    let output = test_repository.git(&["show-ref", "--verify", "--quiet", "refs/heads/feature"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "main"
+    );
+}
+
+#[test]
+fn switches_to_branch_created_by_git_cli() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature");
+    let feature_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
+    test_repository.switch_to("main");
+    let repository = test_repository.discover();
+
+    repository
+        .switch_to(&branch(&repository, "feature"))
+        .expect("switch should succeed");
+
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "feature"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["rev-parse", "HEAD"]),
+        feature_tip
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["show", "HEAD:feature.txt"]),
+        "feature"
+    );
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
+}
+
+#[test]
+fn rebases_diverged_branch_into_state_validated_by_git_cli() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature");
+    let feature_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
+    test_repository.switch_to("main");
+    test_repository.commit_file("main.txt", "main\n", "Add main change");
+    let old_main_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
+    let repository = test_repository.discover();
+
+    let outcome = repository
+        .rebase_onto(&branch(&repository, "feature"))
+        .expect("rebase should succeed");
+
+    assert_eq!(outcome, RebaseOutcome::Completed);
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "main"
+    );
+    assert_success(
+        &["merge-base", "--is-ancestor", "feature", "main"],
+        &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["rev-parse", "main^"]),
+        feature_tip
+    );
+    assert_ne!(
+        test_repository.git_stdout(&["rev-parse", "main"]),
+        old_main_tip
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["rev-list", "--count", "feature..main"]),
+        "1"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["show", "main:main.txt"]),
+        "main"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["show", "main:feature.txt"]),
+        "feature"
+    );
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
+}
+
+#[test]
+fn conflicted_rebase_can_be_continued_by_git_cli() {
+    // set up the conflict
+    let test_repository = TestRepository::new();
+    test_repository.commit_file("shared.txt", "base\n", "Add shared file");
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("shared.txt", "feature\n", "Update shared file on feature");
+    test_repository.switch_to("main");
+    test_repository.commit_file("shared.txt", "main\n", "Update shared file on main");
+    test_repository.commit_file("after.txt", "after\n", "Add change after conflict");
+    let repository = test_repository.discover();
+
+    // try to rebase
+    let outcome = repository
+        .rebase_onto(&branch(&repository, "feature"))
+        .expect("conflict should be returned as an outcome");
+    assert_eq!(outcome, RebaseOutcome::Conflicted);
+    assert!(
+        !test_repository
+            .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
+            .is_empty()
+    );
+
+    // fix the conflict and continue rebasing
+    fs::write(test_repository.path.join("shared.txt"), "resolved\n")
+        .expect("conflict resolution should be written");
+    test_repository.git_success(&["add", "--", "shared.txt"]);
+    let output = test_repository
+        .command_at(&test_repository.path)
+        .env("GIT_EDITOR", "true")
+        .args(["rebase", "--continue"])
+        .output()
+        .expect("git should be available on PATH");
+    assert_success(&["rebase", "--continue"], &output);
+
+    // check the rebase worked
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "main"
+    );
+    assert_success(
+        &["merge-base", "--is-ancestor", "feature", "main"],
+        &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["show", "main:shared.txt"]),
+        "resolved"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["show", "main:after.txt"]),
+        "after"
+    );
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
+}
+
+#[test]
+fn protects_branch_checked_out_in_git_cli_worktree() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    let worktree_path = test_repository.worktree_path();
+    test_repository.git_success(&[
+        "worktree",
+        "add",
+        worktree_path
+            .to_str()
+            .expect("worktree path should be valid UTF-8"),
+        "feature",
+    ]);
+    let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+
+    assert_eq!(feature.checkout(), Checkout::OtherWorktree);
+    assert!(
+        matches!(repository.delete_branch(&feature), Err(Error::BranchCheckedOut(name)) if name == "feature")
+    );
+    assert!(
+        matches!(repository.switch_to(&feature), Err(Error::BranchCheckedOut(name)) if name == "feature")
+    );
+
+    test_repository.git_success(&["show-ref", "--verify", "--quiet", "refs/heads/feature"]);
+    let worktrees = test_repository.git_stdout(&["worktree", "list", "--porcelain"]);
+    let canonical_worktree_path = fs::canonicalize(&worktree_path)
+        .expect("worktree path should have a canonical representation");
+    assert!(worktrees.contains(&format!("worktree {}", canonical_worktree_path.display())));
+    assert!(worktrees.contains("branch refs/heads/feature"));
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "main"
+    );
+    assert_eq!(
+        test_repository.git_stdout_at(&worktree_path, &["branch", "--show-current"]),
+        "feature"
+    );
+}

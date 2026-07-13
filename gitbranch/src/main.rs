@@ -2,15 +2,7 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use thiserror::Error;
-
-mod clean;
-mod git;
-mod rebase;
-mod switch;
-mod ui;
-
-use git::Repository;
+use gitbranch::git::Repository;
 
 #[derive(Debug, Parser)]
 #[command(about = "Interactively operate on local Git branches")]
@@ -29,22 +21,14 @@ enum Command {
     Rebase,
 }
 
-#[derive(Debug, Error)]
-enum Error {
-    #[error(transparent)]
-    Git(#[from] git::Error),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-}
-
-fn run() -> Result<(), Error> {
+fn run() -> Result<(), gitbranch::Error> {
     let command = Cli::parse().command;
     let repository = Repository::discover(".")?;
 
     match command {
-        Command::Clean => clean::run(&repository)?,
-        Command::Switch => switch::run(&repository)?,
-        Command::Rebase => rebase::run(&repository)?,
+        Command::Clean => gitbranch::run_clean(&repository)?,
+        Command::Switch => gitbranch::run_switch(&repository)?,
+        Command::Rebase => gitbranch::run_rebase(&repository)?,
     }
 
     Ok(())
