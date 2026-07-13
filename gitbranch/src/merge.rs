@@ -1,6 +1,6 @@
 use crate::{
     Error,
-    git::{self, MergeOutcome, Repository},
+    git::{self, ConflictableCommandOutcome, Repository},
     ui::{self, App, SingleOperation},
 };
 
@@ -18,10 +18,10 @@ pub fn run(repository: &Repository) -> Result<(), Error> {
     match ui::select_one(app)? {
         None => println!("Cancelled."),
         Some(branch) => match repository.merge_from(&branch)? {
-            MergeOutcome::Completed => {
+            ConflictableCommandOutcome::Completed => {
                 println!("Merged {} into {current_branch}.", branch.name());
             }
-            MergeOutcome::Conflicted => {
+            ConflictableCommandOutcome::Conflicted => {
                 return Err(git::Error::MergeConflicts.into());
             }
         },

@@ -58,21 +58,9 @@ impl LocalBranch {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RebaseOutcome {
+pub enum ConflictableCommandOutcome {
     Completed,
     Conflicted,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MergeOutcome {
-    Completed,
-    Conflicted,
-}
-
-enum GitOperationOutcome {
-    Completed,
-    Conflicted,
-    Failed { status: ExitStatus, message: String },
 }
 
 pub struct Repository {
@@ -160,38 +148,49 @@ impl Repository {
         Ok(())
     }
 
-    pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<RebaseOutcome, Error> {
+    pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
         if self.current_branch()?.as_deref() == Some(branch.name()) {
             return Err(Error::CurrentBranchAsRebaseTarget);
         }
-
-        let branch = self.find_branch(branch)?;
-        let target = branch.get().name()?.to_string();
-        let worktree = self.inner.workdir().ok_or(Error::BareRepository)?;
-        match run_git_operation(worktree, ["rebase", &target])? {
-            GitOperationOutcome::Completed => Ok(RebaseOutcome::Completed),
-            GitOperationOutcome::Conflicted => Ok(RebaseOutcome::Conflicted),
-            GitOperationOutcome::Failed { status, message } => {
-                Err(Error::RebaseFailed { status, message })
-            }
-        }
+        self.run_git_operation(branch, ["rebase"])
     }
 
-    pub fn merge_from(&self, branch: &LocalBranch) -> Result<MergeOutcome, Error> {
+    pub fn merge_from(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
         let current_branch = self.current_branch()?.ok_or(Error::DetachedHeadForMerge)?;
         if current_branch == branch.name() {
             return Err(Error::CurrentBranchAsMergeSource);
         }
+        self.run_git_operation(branch, ["merge", "--no-edit"])
+    }
 
-        let branch = self.find_branch(branch)?;
-        let source = branch.get().name()?.to_string();
-        let worktree = self.inner.workdir().ok_or(Error::BareRepositoryForMerge)?;
-        match run_git_operation(worktree, ["merge", "--no-edit", &source])? {
-            GitOperationOutcome::Completed => Ok(MergeOutcome::Completed),
-            GitOperationOutcome::Conflicted => Ok(MergeOutcome::Conflicted),
-            GitOperationOutcome::Failed { status, message } => {
-                Err(Error::MergeFailed { status, message })
-            }
+    fn run_git_operation<'a, 'b>(
+        &'a self,
+        branch: &LocalBranch,
+        arguments: impl IntoIterator<Item = &'b str>,
+    ) -> Result<ConflictableCommandOutcome, Error> {
+        let other_branch = self.find_branch(branch)?.get().name()?.to_string();
+        let worktree = self.inner.workdir().ok_or(Error::BareRepository)?;
+
+        let mut args: Vec<&str> = arguments.into_iter().collect();
+        args.push(&other_branch);
+        let command = args[0].to_string();
+        let had_conflicts = has_conflicts(worktree)?;
+
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .output()?;
+
+        if output.status.success() {
+            Ok(ConflictableCommandOutcome::Completed)
+        } else if !had_conflicts && has_conflicts(worktree)? {
+            Ok(ConflictableCommandOutcome::Conflicted)
+        } else {
+            Err(Error::CommandFailed {
+                command,
+                status: output.status,
+                message: command_message(&output.stdout, &output.stderr),
+            })
         }
     }
 
@@ -230,28 +229,6 @@ fn checked_out_branch(repository: &GitRepository) -> Result<Option<String>, Erro
     }
 }
 
-fn run_git_operation<'a>(
-    worktree: &Path,
-    arguments: impl IntoIterator<Item = &'a str>,
-) -> Result<GitOperationOutcome, Error> {
-    let had_conflicts = has_conflicts(worktree)?;
-    let output = Command::new("git")
-        .args(arguments)
-        .current_dir(worktree)
-        .output()?;
-
-    if output.status.success() {
-        Ok(GitOperationOutcome::Completed)
-    } else if !had_conflicts && has_conflicts(worktree)? {
-        Ok(GitOperationOutcome::Conflicted)
-    } else {
-        Ok(GitOperationOutcome::Failed {
-            status: output.status,
-            message: command_message(&output.stdout, &output.stderr),
-        })
-    }
-}
-
 fn has_conflicts(worktree: &Path) -> Result<bool, Error> {
     Ok(GitRepository::open(worktree)?.index()?.has_conflicts())
 }
@@ -283,10 +260,14 @@ pub enum Error {
     DetachedHead,
     #[error("the current branch cannot be its own rebase target")]
     CurrentBranchAsRebaseTarget,
-    #[error("cannot rebase a bare repository")]
+    #[error("cannot operate in a bare repository")]
     BareRepository,
-    #[error("git rebase failed with {status}: {message}")]
-    RebaseFailed { status: ExitStatus, message: String },
+    #[error("git {command} failed with {status}: {message}")]
+    CommandFailed {
+        command: String,
+        status: ExitStatus,
+        message: String,
+    },
     #[error(
         "rebase stopped due to conflicts; resolve them and run `git rebase --continue`, or run `git rebase --abort`"
     )]
@@ -295,10 +276,6 @@ pub enum Error {
     DetachedHeadForMerge,
     #[error("the current branch cannot be merged into itself")]
     CurrentBranchAsMergeSource,
-    #[error("cannot merge in a bare repository")]
-    BareRepositoryForMerge,
-    #[error("git merge failed with {status}: {message}")]
-    MergeFailed { status: ExitStatus, message: String },
     #[error(
         "merge stopped due to conflicts; resolve them and run `git merge --continue`, or run `git merge --abort`"
     )]
@@ -316,7 +293,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use super::{Checkout, Error, MergeOutcome, RebaseOutcome, Repository};
+    use super::{Checkout, ConflictableCommandOutcome, Error, Repository};
 
     fn repository_with_branches() -> (TempDir, GitRepository) {
         let directory = TempDir::new().expect("temporary directory should be created");
@@ -705,7 +682,7 @@ mod tests {
             .merge_from(&feature)
             .expect("merge should succeed");
 
-        assert_eq!(outcome, MergeOutcome::Completed);
+        assert_eq!(outcome, ConflictableCommandOutcome::Completed);
         assert_eq!(
             repository.inner.head().expect("HEAD should exist").target(),
             Some(feature_tip)
@@ -806,7 +783,7 @@ mod tests {
             .inner
             .find_commit(new_main_tip)
             .expect("rebased commit should exist");
-        assert_eq!(outcome, RebaseOutcome::Completed);
+        assert_eq!(outcome, ConflictableCommandOutcome::Completed);
         assert_ne!(new_main_tip, old_main_tip);
         assert_eq!(new_main.parent_id(0), Ok(feature_tip));
         assert!(
@@ -853,7 +830,7 @@ mod tests {
             .rebase_onto(&feature)
             .expect("conflict should be returned as an outcome");
 
-        assert_eq!(outcome, RebaseOutcome::Conflicted);
+        assert_eq!(outcome, ConflictableCommandOutcome::Conflicted);
         assert!(matches!(
             repository.inner.state(),
             RepositoryState::RebaseMerge | RepositoryState::RebaseInteractive

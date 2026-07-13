@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use gitbranch::git::{Checkout, Error, LocalBranch, MergeOutcome, RebaseOutcome, Repository};
+use gitbranch::git::{Checkout, ConflictableCommandOutcome, Error, LocalBranch, Repository};
 use tempfile::TempDir;
 
 struct TestRepository {
@@ -246,7 +246,7 @@ fn merges_diverged_branch_into_state_validated_by_git_cli() {
         .merge_from(&branch(&repository, "feature"))
         .expect("merge should succeed");
 
-    assert_eq!(outcome, MergeOutcome::Completed);
+    assert_eq!(outcome, ConflictableCommandOutcome::Completed);
     assert_eq!(
         test_repository.git_stdout(&["branch", "--show-current"]),
         "main"
@@ -288,7 +288,7 @@ fn conflicted_merge_can_be_continued_by_git_cli() {
     let outcome = repository
         .merge_from(&branch(&repository, "feature"))
         .expect("conflict should be returned as an outcome");
-    assert_eq!(outcome, MergeOutcome::Conflicted);
+    assert_eq!(outcome, ConflictableCommandOutcome::Conflicted);
     assert!(
         !test_repository
             .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
@@ -342,7 +342,7 @@ fn rebases_diverged_branch_into_state_validated_by_git_cli() {
         .rebase_onto(&branch(&repository, "feature"))
         .expect("rebase should succeed");
 
-    assert_eq!(outcome, RebaseOutcome::Completed);
+    assert_eq!(outcome, ConflictableCommandOutcome::Completed);
     assert_eq!(
         test_repository.git_stdout(&["branch", "--show-current"]),
         "main"
@@ -395,7 +395,7 @@ fn conflicted_rebase_can_be_continued_by_git_cli() {
     let outcome = repository
         .rebase_onto(&branch(&repository, "feature"))
         .expect("conflict should be returned as an outcome");
-    assert_eq!(outcome, RebaseOutcome::Conflicted);
+    assert_eq!(outcome, ConflictableCommandOutcome::Conflicted);
     assert!(
         !test_repository
             .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
