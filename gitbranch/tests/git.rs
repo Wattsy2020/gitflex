@@ -165,6 +165,39 @@ fn deletes_branch_created_by_git_cli() {
 }
 
 #[test]
+fn deletes_branch_with_duplicate_github_pr_metadata() {
+    // Tests a problem where the branch has duplicate identical branch.<name>.github-pr-owner-number entries metadata,
+    // associated with VS Code’s GitHub Pull Requests extension (related extension issue (https://github.com/microsoft/vscode-pull-request-github/issues/6134))
+    const BRANCH: &str = "github-pr-branch";
+    const CONFIG_KEY: &str = "branch.github-pr-branch.github-pr-owner-number";
+    const CONFIG_VALUE: &str = "owner#repository#123";
+
+    let test_repository = TestRepository::new();
+    test_repository.create_branch(BRANCH);
+    test_repository.git_success(&["config", "--add", CONFIG_KEY, CONFIG_VALUE]);
+    test_repository.git_success(&["config", "--add", CONFIG_KEY, CONFIG_VALUE]);
+    assert_eq!(
+        test_repository.git_stdout(&["config", "--get-all", CONFIG_KEY]),
+        format!("{CONFIG_VALUE}\n{CONFIG_VALUE}")
+    );
+    let repository = test_repository.discover();
+
+    repository
+        .delete_branch(&branch(&repository, BRANCH))
+        .expect("branch with duplicate PR metadata should be deleted");
+
+    let branch_output = test_repository.git(&[
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "refs/heads/github-pr-branch",
+    ]);
+    assert_eq!(branch_output.status.code(), Some(1));
+    let config_output = test_repository.git(&["config", "--get-all", CONFIG_KEY]);
+    assert_eq!(config_output.status.code(), Some(1));
+}
+
+#[test]
 fn switches_to_branch_created_by_git_cli() {
     let test_repository = TestRepository::new();
     test_repository.create_branch("feature");

@@ -115,8 +115,20 @@ impl Repository {
     }
 
     pub fn delete_branch(&self, branch: &LocalBranch) -> Result<(), Error> {
-        let mut branch_to_delete = self.get_non_checkedout_branch(branch)?;
-        branch_to_delete.delete().map_err(Error::from)
+        self.get_non_checkedout_branch(branch)?;
+        let repository_directory = self.inner.workdir().unwrap_or_else(|| self.inner.path());
+        let output = Command::new("git")
+            .args(["branch", "-D", "--", branch.name()])
+            .current_dir(repository_directory)
+            .output()?;
+        output
+            .status
+            .success()
+            .then_some(())
+            .ok_or(Error::DeleteBranchFailed {
+                status: output.status,
+                message: command_message(&output.stdout, &output.stderr),
+            })
     }
 
     pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
@@ -214,6 +226,8 @@ pub enum Error {
     InvalidWorktreeName,
     #[error("branch {0} is checked out in a worktree")]
     BranchCheckedOut(String),
+    #[error("git branch deletion failed with {status}: {message}")]
+    DeleteBranchFailed { status: ExitStatus, message: String },
     #[error("cannot rebase while HEAD is detached")]
     DetachedHead,
     #[error("the current branch cannot be its own rebase target")]
