@@ -246,18 +246,15 @@ impl App<SingleMode> {
     }
 
     pub fn rebase(mut branches: Vec<LocalBranch>, last_target: Option<String>) -> Option<Self> {
-        let last_target = last_target.filter(|target| {
-            branches
-                .iter()
-                .any(|branch| branch.name() == target && branch.is_rebase_target())
-        });
-        branches.sort_by(|left, right| {
-            let left_was_last = last_target.as_deref() == Some(left.name());
-            let right_was_last = last_target.as_deref() == Some(right.name());
-            right_was_last
-                .cmp(&left_was_last)
-                .then_with(|| left.name().cmp(right.name()))
-        });
+        if let Some(last_target) = last_target.as_deref() {
+            branches.sort_by(|left, right| {
+                let left_was_last = last_target == left.name();
+                let right_was_last = last_target == right.name();
+                right_was_last
+                    .cmp(&left_was_last)
+                    .then_with(|| left.name().cmp(right.name()))
+            });
+        }
 
         Self::new(
             branches,

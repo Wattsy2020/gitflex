@@ -79,13 +79,12 @@ impl RebaseHistory {
             .enumerate()
             .map(|(index, line)| {
                 let line_number = index + 1;
-                let (source, target) = line
-                    .split_once('\t')
+                line.split_once('\t')
                     .filter(|(source, target)| {
                         !source.is_empty() && !target.is_empty() && !target.contains('\t')
                     })
-                    .ok_or(InvalidRecord { line_number })?;
-                Ok((source.to_owned(), target.to_owned()))
+                    .ok_or(InvalidRecord { line_number })
+                    .map(|(source, target)| (source.to_owned(), target.to_owned()))
             })
             .collect::<Result<BTreeMap<_, _>, InvalidRecord>>()?;
 
@@ -108,12 +107,14 @@ impl RebaseHistory {
     }
 }
 
+/// A file based Lock that supports atomically writing to a path by writing to the lock file and then switching to the path
 struct LockFile {
     path: PathBuf,
     file: Option<File>,
 }
 
 impl LockFile {
+    /// Attempt to create the lock, failing if it exists
     fn create(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         Ok(Self {
@@ -122,6 +123,7 @@ impl LockFile {
         })
     }
 
+    /// Write to the lock file
     fn write_all(&mut self, contents: &[u8]) -> io::Result<()> {
         self.file
             .as_mut()
@@ -130,6 +132,7 @@ impl LockFile {
         Ok(())
     }
 
+    /// Commit contents of the lock file, writing them into the destination
     fn commit(mut self, destination: &Path) -> io::Result<()> {
         self.file
             .take()

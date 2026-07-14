@@ -273,9 +273,14 @@ impl HeadOperationRepository {
             return Err(Error::CurrentBranchAsRebaseTarget);
         }
         let outcome = self.run_git_operation(branch, ["rebase"])?;
-        self.repository
+
+        // ignore errors if we can't record our rebase history to file
+        // the user doesn't know or care that we cache things in a file and failed to write to it
+        // they just want to complete their operation
+        let _ = self
+            .repository
             .rebase_history
-            .record(RebaseRecord::new(current_branch, branch.name()))?;
+            .record(RebaseRecord::new(current_branch, branch.name()));
         Ok(outcome)
     }
 

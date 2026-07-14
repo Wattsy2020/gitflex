@@ -9,7 +9,11 @@ pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
         .current_branch()?
         .ok_or(git::Error::DetachedHead)?;
 
-    let last_target = repository.last_rebase_target()?;
+    // ignore errors if we can't find last_rebase_target from file
+    // the user doesn't know or care that we cache things in a file and failed to read from it
+    // they just want to complete their operation
+    let last_target = repository.last_rebase_target().ok().flatten();
+
     let branches = repository.local_branches()?;
     let Some(app) = App::rebase(branches, last_target) else {
         println!("No branches available to rebase onto.");
