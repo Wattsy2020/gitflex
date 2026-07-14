@@ -4,6 +4,7 @@ mod clean;
 pub mod git;
 mod merge;
 mod rebase;
+mod rebase_history;
 mod switch;
 mod ui;
 

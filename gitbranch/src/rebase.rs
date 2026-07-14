@@ -1,7 +1,7 @@
 use crate::{
     Error,
     git::{self, ConflictableCommandOutcome, HeadOperationRepository},
-    ui::{self, App, SingleOperation},
+    ui::{self, App},
 };
 
 pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
@@ -9,8 +9,9 @@ pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
         .current_branch()?
         .ok_or(git::Error::DetachedHead)?;
 
+    let last_target = repository.last_rebase_target()?;
     let branches = repository.local_branches()?;
-    let Some(app) = App::single(branches, SingleOperation::Rebase) else {
+    let Some(app) = App::rebase(branches, last_target) else {
         println!("No branches available to rebase onto.");
         return Ok(());
     };

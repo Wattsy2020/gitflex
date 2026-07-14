@@ -11,6 +11,8 @@ use git2::{
 };
 use thiserror::Error;
 
+use crate::rebase_history::{RebaseHistoryStore, RebaseRecord};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Checkout {
     Available,
@@ -116,6 +118,7 @@ impl fmt::Display for InProgressOperation {
 pub struct Repository {
     inner: git2::Repository,
     worktree: PathBuf,
+    rebase_history: RebaseHistoryStore,
 }
 
 pub struct HeadOperationRepository {
@@ -128,9 +131,11 @@ impl Repository {
             .workdir()
             .expect("repository should have been validated as non-bare")
             .to_owned();
+        let rebase_history = RebaseHistoryStore::new(repository.commondir());
         Repository {
             inner: repository,
             worktree,
+            rebase_history,
         }
     }
 
@@ -242,6 +247,11 @@ impl HeadOperationRepository {
         self.repository.current_branch()
     }
 
+    pub(crate) fn last_rebase_target(&self) -> Result<Option<String>, Error> {
+        let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
+        Ok(self.repository.rebase_history.target_for(&current_branch)?)
+    }
+
     pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
         let branch = self.repository.get_non_checkedout_branch(branch)?;
         let reference = branch.get();
@@ -258,10 +268,15 @@ impl HeadOperationRepository {
     }
 
     pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
-        if self.current_branch()?.as_deref() == Some(branch.name()) {
+        let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
+        if current_branch == branch.name() {
             return Err(Error::CurrentBranchAsRebaseTarget);
         }
-        self.run_git_operation(branch, ["rebase"])
+        let outcome = self.run_git_operation(branch, ["rebase"])?;
+        self.repository
+            .rebase_history
+            .record(RebaseRecord::new(current_branch, branch.name()))?;
+        Ok(outcome)
     }
 
     pub fn merge_from(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
@@ -397,7 +412,9 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use super::{Checkout, ConflictableCommandOutcome, Error, InProgressOperation, Repository};
+    use super::{
+        Checkout, ConflictableCommandOutcome, Error, InProgressOperation, RebaseRecord, Repository,
+    };
 
     fn repository_with_branches() -> (TempDir, GitRepository) {
         let directory = TempDir::new().expect("temporary directory should be created");
@@ -824,6 +841,39 @@ mod tests {
     }
 
     #[test]
+    fn linked_worktree_records_rebase_history_in_the_common_git_directory() {
+        let (main_directory, worktree_directory, _) = initialise_worktree();
+        let repository = Repository::discover(worktree_directory.path().join("feature"))
+            .expect("linked worktree repository should be discovered");
+        let main = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "main")
+            .expect("main branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
+
+        let outcome = repository
+            .rebase_onto(&main)
+            .expect("up-to-date rebase should succeed");
+
+        assert_eq!(outcome, ConflictableCommandOutcome::Completed);
+        assert_eq!(
+            fs::read_to_string(main_directory.path().join(".git/gitbranch-rebases"))
+                .expect("common rebase history should be readable"),
+            "feature\tmain\n"
+        );
+        assert!(
+            !main_directory
+                .path()
+                .join(".git/worktrees/feature-worktree/gitbranch-rebases")
+                .exists()
+        );
+    }
+
+    #[test]
     fn switches_to_available_branch() {
         let (_directory, repository) = repository_with_branches();
         let repository = Repository::new(repository);
@@ -1073,6 +1123,45 @@ mod tests {
                 .get_name("main.txt")
                 .is_some()
         );
+        assert_eq!(
+            repository
+                .last_rebase_target()
+                .expect("rebase history should be readable")
+                .as_deref(),
+            Some("feature")
+        );
+    }
+
+    #[test]
+    fn rejected_rebase_does_not_replace_history() {
+        let (_directory, repository) = repository_with_branches();
+        let repository = Repository::new(repository);
+        repository
+            .rebase_history
+            .record(RebaseRecord::new("main", "feature"))
+            .expect("initial rebase target should be recorded");
+        let main = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "main")
+            .expect("main branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
+
+        let error = repository
+            .rebase_onto(&main)
+            .expect_err("a branch should not be rebased onto itself");
+
+        assert!(matches!(error, Error::CurrentBranchAsRebaseTarget));
+        assert_eq!(
+            repository
+                .last_rebase_target()
+                .expect("rebase history should remain readable")
+                .as_deref(),
+            Some("feature")
+        );
     }
 
     #[test]
@@ -1132,6 +1221,15 @@ mod tests {
                 .index()
                 .expect("index should open")
                 .has_conflicts()
+        );
+        assert_eq!(
+            repository
+                .repository
+                .rebase_history
+                .target_for("main")
+                .expect("rebase history should be readable")
+                .as_deref(),
+            Some("feature")
         );
 
         let repository = Repository::discover(directory.path())

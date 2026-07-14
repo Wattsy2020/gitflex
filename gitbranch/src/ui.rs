@@ -16,10 +16,10 @@ use ratatui::{
 
 use crate::git::{Checkout, LocalBranch};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SingleOperation {
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SingleOperation {
     Switch,
-    Rebase,
+    Rebase { last_target: Option<String> },
     Merge,
 }
 
@@ -57,6 +57,7 @@ trait Mode {
     fn is_selectable(&self, branch: &LocalBranch) -> bool;
     fn initially_selected(&self, branch: &LocalBranch) -> bool;
     fn marker(&self, branch: &Branch) -> &'static str;
+    fn annotation(&self, branch: &LocalBranch) -> Option<&'static str>;
     fn is_selected(&self, branch: &Branch) -> bool;
     fn toggle(&self, branch: &mut Branch);
     fn confirms(&self, confirmation: Confirmation) -> bool;
@@ -83,6 +84,10 @@ impl Mode for CleanMode {
         } else {
             "[ ] "
         }
+    }
+
+    fn annotation(&self, _branch: &LocalBranch) -> Option<&'static str> {
+        None
     }
 
     fn is_selected(&self, branch: &Branch) -> bool {
@@ -119,9 +124,9 @@ impl Mode for SingleMode {
     type Output = LocalBranch;
 
     fn is_selectable(&self, branch: &LocalBranch) -> bool {
-        match self.operation {
+        match &self.operation {
             SingleOperation::Switch => branch.is_switchable(),
-            SingleOperation::Rebase => branch.is_rebase_target(),
+            SingleOperation::Rebase { .. } => branch.is_rebase_target(),
             SingleOperation::Merge => branch.is_merge_source(),
         }
     }
@@ -132,6 +137,15 @@ impl Mode for SingleMode {
 
     fn marker(&self, _branch: &Branch) -> &'static str {
         ""
+    }
+
+    fn annotation(&self, branch: &LocalBranch) -> Option<&'static str> {
+        match &self.operation {
+            SingleOperation::Rebase {
+                last_target: Some(last_target),
+            } if last_target == branch.name() => Some(" (last rebased onto)"),
+            _ => None,
+        }
     }
 
     fn is_selected(&self, _branch: &Branch) -> bool {
@@ -152,9 +166,11 @@ impl Mode for SingleMode {
     }
 
     fn help(&self) -> &'static str {
-        match self.operation {
+        match &self.operation {
             SingleOperation::Switch => "↑/↓ navigate   enter switch to branch   q/esc quit",
-            SingleOperation::Rebase => "↑/↓ navigate   enter rebase onto branch   q/esc quit",
+            SingleOperation::Rebase { .. } => {
+                "↑/↓ navigate   enter rebase onto branch   q/esc quit"
+            }
             SingleOperation::Merge => "↑/↓ navigate   enter merge branch   q/esc quit",
         }
     }
@@ -175,13 +191,14 @@ impl Branch {
 
     fn branch_text<M: Mode>(&self, mode: &M) -> String {
         let marker = mode.marker(self);
+        let annotation = mode.annotation(&self.branch).unwrap_or_default();
         let status = match self.branch.checkout() {
             Checkout::Available => "",
             Checkout::CurrentWorktree => " (current)",
             Checkout::OtherWorktree => " (other worktree)",
         };
 
-        format!("{marker}{}{status}", self.branch.name())
+        format!("{marker}{}{status}{annotation}", self.branch.name())
     }
 
     fn color<M: Mode>(&self, mode: &M, highlighted: bool) -> Color {
@@ -219,8 +236,44 @@ impl App<CleanMode> {
 }
 
 impl App<SingleMode> {
-    pub fn single(branches: Vec<LocalBranch>, operation: SingleOperation) -> Option<Self> {
-        Self::new(branches, SingleMode { operation })
+    pub fn switch(branches: Vec<LocalBranch>) -> Option<Self> {
+        Self::new(
+            branches,
+            SingleMode {
+                operation: SingleOperation::Switch,
+            },
+        )
+    }
+
+    pub fn rebase(mut branches: Vec<LocalBranch>, last_target: Option<String>) -> Option<Self> {
+        let last_target = last_target.filter(|target| {
+            branches
+                .iter()
+                .any(|branch| branch.name() == target && branch.is_rebase_target())
+        });
+        branches.sort_by(|left, right| {
+            let left_was_last = last_target.as_deref() == Some(left.name());
+            let right_was_last = last_target.as_deref() == Some(right.name());
+            right_was_last
+                .cmp(&left_was_last)
+                .then_with(|| left.name().cmp(right.name()))
+        });
+
+        Self::new(
+            branches,
+            SingleMode {
+                operation: SingleOperation::Rebase { last_target },
+            },
+        )
+    }
+
+    pub fn merge(branches: Vec<LocalBranch>) -> Option<Self> {
+        Self::new(
+            branches,
+            SingleMode {
+                operation: SingleOperation::Merge,
+            },
+        )
     }
 }
 
@@ -425,7 +478,7 @@ pub fn select_one(mut app: App<SingleMode>) -> io::Result<Option<LocalBranch>> {
 mod tests {
     use crate::git::{Checkout, LocalBranch};
 
-    use super::{Action, App, Confirmation, SingleOperation, Transition};
+    use super::{Action, App, Confirmation, Transition};
 
     fn branch(name: &str, checkout: Checkout) -> LocalBranch {
         LocalBranch::for_test(name, checkout)
@@ -476,13 +529,13 @@ mod tests {
 
     #[test]
     fn single_selection_navigates_and_confirms_the_highlighted_branch() {
-        let mut app = App::single(
+        let mut app = App::rebase(
             vec![
                 branch("feature-a", Checkout::Available),
                 branch("feature-b", Checkout::Available),
                 branch("main", Checkout::CurrentWorktree),
             ],
-            SingleOperation::Rebase,
+            None,
         )
         .unwrap();
         assert_eq!(app.update(Action::Next), Transition::Continue);
@@ -495,13 +548,10 @@ mod tests {
 
     #[test]
     fn single_selection_rejects_an_ineligible_highlighted_branch() {
-        let mut app = App::single(
-            vec![
-                branch("feature", Checkout::Available),
-                branch("main", Checkout::CurrentWorktree),
-            ],
-            SingleOperation::Switch,
-        )
+        let mut app = App::switch(vec![
+            branch("feature", Checkout::Available),
+            branch("main", Checkout::CurrentWorktree),
+        ])
         .unwrap();
         assert_eq!(app.update(Action::Next), Transition::Continue);
 
@@ -513,13 +563,10 @@ mod tests {
 
     #[test]
     fn merge_selects_a_branch_checked_out_in_another_worktree() {
-        let mut app = App::single(
-            vec![
-                branch("main", Checkout::CurrentWorktree),
-                branch("feature", Checkout::OtherWorktree),
-            ],
-            SingleOperation::Merge,
-        )
+        let mut app = App::merge(vec![
+            branch("main", Checkout::CurrentWorktree),
+            branch("feature", Checkout::OtherWorktree),
+        ])
         .unwrap();
 
         let Transition::Complete(branch) = app.update(Action::Confirm(Confirmation::Plain)) else {
@@ -530,12 +577,60 @@ mod tests {
 
     #[test]
     fn cancellation_exits_without_a_selection() {
-        let mut app = App::single(
-            vec![branch("feature", Checkout::Available)],
-            SingleOperation::Switch,
+        let mut app = App::switch(vec![branch("feature", Checkout::Available)]).unwrap();
+
+        assert_eq!(app.update(Action::Cancel), Transition::Cancel);
+    }
+
+    #[test]
+    fn rebase_promotes_selects_and_labels_the_last_target() {
+        let mut app = App::rebase(
+            vec![
+                branch("release", Checkout::Available),
+                branch("feature", Checkout::CurrentWorktree),
+                branch("main", Checkout::OtherWorktree),
+                branch("develop", Checkout::Available),
+            ],
+            Some("main".to_string()),
         )
         .unwrap();
 
-        assert_eq!(app.update(Action::Cancel), Transition::Cancel);
+        assert_eq!(
+            app.branches
+                .iter()
+                .map(|branch| branch.branch.name())
+                .collect::<Vec<_>>(),
+            ["main", "develop", "feature", "release"]
+        );
+        assert_eq!(
+            app.branches[0].branch_text(&app.mode),
+            "main (other worktree) (last rebased onto)"
+        );
+
+        let Transition::Complete(branch) = app.update(Action::Confirm(Confirmation::Plain)) else {
+            panic!("the remembered target should be initially selected");
+        };
+        assert_eq!(branch.name(), "main");
+    }
+
+    #[test]
+    fn rebase_ignores_a_stale_last_target() {
+        let app = App::rebase(
+            vec![
+                branch("main", Checkout::Available),
+                branch("feature", Checkout::CurrentWorktree),
+                branch("develop", Checkout::Available),
+            ],
+            Some("deleted".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.branches
+                .iter()
+                .map(|branch| branch.branch_text(&app.mode))
+                .collect::<Vec<_>>(),
+            ["develop", "feature (current)", "main"]
+        );
     }
 }

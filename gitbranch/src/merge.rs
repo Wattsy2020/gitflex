@@ -1,7 +1,7 @@
 use crate::{
     Error,
     git::{self, ConflictableCommandOutcome, HeadOperationRepository},
-    ui::{self, App, SingleOperation},
+    ui::{self, App},
 };
 
 pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
@@ -10,7 +10,7 @@ pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
         .ok_or(git::Error::DetachedHeadForMerge)?;
 
     let branches = repository.local_branches()?;
-    let Some(app) = App::single(branches, SingleOperation::Merge) else {
+    let Some(app) = App::merge(branches) else {
         println!("No branches available to merge.");
         return Ok(());
     };
