@@ -206,9 +206,13 @@ fn switches_to_branch_created_by_git_cli() {
     let feature_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
     test_repository.switch_to("main");
     let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+    let repository = repository
+        .into_head_operation()
+        .expect("repository should allow HEAD operations");
 
     repository
-        .switch_to(&branch(&repository, "feature"))
+        .switch_to(&feature)
         .expect("switch should succeed");
 
     assert_eq!(
@@ -241,9 +245,13 @@ fn merges_diverged_branch_into_state_validated_by_git_cli() {
     test_repository.commit_file("main.txt", "main\n", "Add main change");
     let old_main_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
     let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+    let repository = repository
+        .into_head_operation()
+        .expect("repository should allow HEAD operations");
 
     let outcome = repository
-        .merge_from(&branch(&repository, "feature"))
+        .merge_from(&feature)
         .expect("merge should succeed");
 
     assert_eq!(outcome, ConflictableCommandOutcome::Completed);
@@ -284,9 +292,13 @@ fn conflicted_merge_can_be_continued_by_git_cli() {
     test_repository.switch_to("main");
     test_repository.commit_file("shared.txt", "main\n", "Update shared file on main");
     let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+    let repository = repository
+        .into_head_operation()
+        .expect("repository should allow HEAD operations");
 
     let outcome = repository
-        .merge_from(&branch(&repository, "feature"))
+        .merge_from(&feature)
         .expect("conflict should be returned as an outcome");
     assert_eq!(outcome, ConflictableCommandOutcome::Conflicted);
     assert!(
@@ -337,9 +349,13 @@ fn rebases_diverged_branch_into_state_validated_by_git_cli() {
     test_repository.commit_file("main.txt", "main\n", "Add main change");
     let old_main_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
     let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+    let repository = repository
+        .into_head_operation()
+        .expect("repository should allow HEAD operations");
 
     let outcome = repository
-        .rebase_onto(&branch(&repository, "feature"))
+        .rebase_onto(&feature)
         .expect("rebase should succeed");
 
     assert_eq!(outcome, ConflictableCommandOutcome::Completed);
@@ -390,10 +406,14 @@ fn conflicted_rebase_can_be_continued_by_git_cli() {
     test_repository.commit_file("shared.txt", "main\n", "Update shared file on main");
     test_repository.commit_file("after.txt", "after\n", "Add change after conflict");
     let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+    let repository = repository
+        .into_head_operation()
+        .expect("repository should allow HEAD operations");
 
     // try to rebase
     let outcome = repository
-        .rebase_onto(&branch(&repository, "feature"))
+        .rebase_onto(&feature)
         .expect("conflict should be returned as an outcome");
     assert_eq!(outcome, ConflictableCommandOutcome::Conflicted);
     assert!(
@@ -458,6 +478,9 @@ fn protects_branch_checked_out_in_git_cli_worktree() {
     assert!(
         matches!(repository.delete_branch(&feature), Err(Error::BranchCheckedOut(name)) if name == "feature")
     );
+    let repository = repository
+        .into_head_operation()
+        .expect("repository should allow HEAD operations");
     assert!(
         matches!(repository.switch_to(&feature), Err(Error::BranchCheckedOut(name)) if name == "feature")
     );

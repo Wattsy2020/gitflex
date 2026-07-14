@@ -1,9 +1,14 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
 use git2::build::CheckoutBuilder;
-use git2::{Branch, BranchType, ErrorCode, ObjectType, Repository as GitRepository};
+use git2::{
+    Branch, BranchType, ErrorCode, ObjectType, Repository as GitRepository, RepositoryState,
+    StatusOptions,
+};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,18 +68,88 @@ pub enum ConflictableCommandOutcome {
     Conflicted,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InProgressOperation {
+    Merge,
+    Revert,
+    CherryPick,
+    Bisect,
+    Rebase,
+    MailboxApply,
+    MailboxApplyOrRebase,
+}
+
+impl InProgressOperation {
+    fn from_repository_state(state: RepositoryState) -> Option<Self> {
+        match state {
+            RepositoryState::Clean => None,
+            RepositoryState::Merge => Some(Self::Merge),
+            RepositoryState::Revert | RepositoryState::RevertSequence => Some(Self::Revert),
+            RepositoryState::CherryPick | RepositoryState::CherryPickSequence => {
+                Some(Self::CherryPick)
+            }
+            RepositoryState::Bisect => Some(Self::Bisect),
+            RepositoryState::Rebase
+            | RepositoryState::RebaseInteractive
+            | RepositoryState::RebaseMerge => Some(Self::Rebase),
+            RepositoryState::ApplyMailbox => Some(Self::MailboxApply),
+            RepositoryState::ApplyMailboxOrRebase => Some(Self::MailboxApplyOrRebase),
+        }
+    }
+}
+
+impl fmt::Display for InProgressOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let operation = match self {
+            Self::Merge => "merge",
+            Self::Revert => "revert",
+            Self::CherryPick => "cherry-pick",
+            Self::Bisect => "bisect",
+            Self::Rebase => "rebase",
+            Self::MailboxApply => "mailbox apply",
+            Self::MailboxApplyOrRebase => "mailbox apply or rebase",
+        };
+        formatter.write_str(operation)
+    }
+}
+
 pub struct Repository {
     inner: git2::Repository,
+    worktree: PathBuf,
+}
+
+pub struct HeadOperationRepository {
+    repository: Repository,
 }
 
 impl Repository {
     fn new(repository: GitRepository) -> Repository {
-        Repository { inner: repository }
+        let worktree = repository
+            .workdir()
+            .expect("repository should have been validated as non-bare")
+            .to_owned();
+        Repository {
+            inner: repository,
+            worktree,
+        }
     }
 
     pub fn discover(path: impl AsRef<Path>) -> Result<Self, Error> {
         let repository = git2::Repository::discover(path)?;
+        if repository.is_bare() {
+            return Err(Error::BareRepository);
+        }
         Ok(Repository::new(repository))
+    }
+
+    pub fn into_head_operation(self) -> Result<HeadOperationRepository, Error> {
+        if let Some(operation) = InProgressOperation::from_repository_state(self.inner.state()) {
+            return Err(Error::OperationInProgress(operation));
+        }
+        if has_tracked_changes(&self.inner)? {
+            return Err(Error::TrackedChanges);
+        }
+        Ok(HeadOperationRepository { repository: self })
     }
 
     pub fn local_branches(&self) -> Result<Vec<LocalBranch>, Error> {
@@ -120,10 +195,9 @@ impl Repository {
 
     pub fn delete_branch(&self, branch: &LocalBranch) -> Result<(), Error> {
         self.get_non_checkedout_branch(branch)?;
-        let repository_directory = self.inner.workdir().unwrap_or_else(|| self.inner.path());
         let output = Command::new("git")
             .args(["branch", "-D", "--", branch.name()])
-            .current_dir(repository_directory)
+            .current_dir(&self.worktree)
             .output()?;
         output
             .status
@@ -133,65 +207,6 @@ impl Repository {
                 status: output.status,
                 message: command_message(&output.stdout, &output.stderr),
             })
-    }
-
-    pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
-        let branch = self.get_non_checkedout_branch(branch)?;
-        let reference = branch.get();
-        let reference_name = reference.name()?;
-        let target = reference.peel(ObjectType::Commit)?;
-        let mut checkout = CheckoutBuilder::new();
-        checkout.safe();
-
-        self.inner.checkout_tree(&target, Some(&mut checkout))?;
-        self.inner.set_head(reference_name)?;
-        Ok(())
-    }
-
-    pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
-        if self.current_branch()?.as_deref() == Some(branch.name()) {
-            return Err(Error::CurrentBranchAsRebaseTarget);
-        }
-        self.run_git_operation(branch, ["rebase"])
-    }
-
-    pub fn merge_from(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
-        let current_branch = self.current_branch()?.ok_or(Error::DetachedHeadForMerge)?;
-        if current_branch == branch.name() {
-            return Err(Error::CurrentBranchAsMergeSource);
-        }
-        self.run_git_operation(branch, ["merge", "--no-edit"])
-    }
-
-    fn run_git_operation<'a, 'b>(
-        &'a self,
-        branch: &LocalBranch,
-        arguments: impl IntoIterator<Item = &'b str>,
-    ) -> Result<ConflictableCommandOutcome, Error> {
-        let other_branch = self.find_branch(branch)?.get().name()?.to_string();
-        let worktree = self.inner.workdir().ok_or(Error::BareRepository)?;
-
-        let mut args: Vec<&str> = arguments.into_iter().collect();
-        args.push(&other_branch);
-        let command = args[0].to_string();
-        let had_conflicts = has_conflicts(worktree)?;
-
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(worktree)
-            .output()?;
-
-        if output.status.success() {
-            Ok(ConflictableCommandOutcome::Completed)
-        } else if !had_conflicts && has_conflicts(worktree)? {
-            Ok(ConflictableCommandOutcome::Conflicted)
-        } else {
-            Err(Error::CommandFailed {
-                command,
-                status: output.status,
-                message: command_message(&output.stdout, &output.stderr),
-            })
-        }
     }
 
     fn checked_out_branches(&self) -> Result<HashSet<String>, Error> {
@@ -218,6 +233,82 @@ impl Repository {
     }
 }
 
+impl HeadOperationRepository {
+    pub fn local_branches(&self) -> Result<Vec<LocalBranch>, Error> {
+        self.repository.local_branches()
+    }
+
+    pub fn current_branch(&self) -> Result<Option<String>, Error> {
+        self.repository.current_branch()
+    }
+
+    pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
+        let branch = self.repository.get_non_checkedout_branch(branch)?;
+        let reference = branch.get();
+        let reference_name = reference.name()?;
+        let target = reference.peel(ObjectType::Commit)?;
+        let mut checkout = CheckoutBuilder::new();
+        checkout.safe();
+
+        self.repository
+            .inner
+            .checkout_tree(&target, Some(&mut checkout))?;
+        self.repository.inner.set_head(reference_name)?;
+        Ok(())
+    }
+
+    pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
+        if self.current_branch()?.as_deref() == Some(branch.name()) {
+            return Err(Error::CurrentBranchAsRebaseTarget);
+        }
+        self.run_git_operation(branch, ["rebase"])
+    }
+
+    pub fn merge_from(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
+        let current_branch = self.current_branch()?.ok_or(Error::DetachedHeadForMerge)?;
+        if current_branch == branch.name() {
+            return Err(Error::CurrentBranchAsMergeSource);
+        }
+        self.run_git_operation(branch, ["merge", "--no-edit"])
+    }
+
+    fn run_git_operation<'a, 'b>(
+        &'a self,
+        branch: &LocalBranch,
+        arguments: impl IntoIterator<Item = &'b str>,
+    ) -> Result<ConflictableCommandOutcome, Error> {
+        let other_branch = self
+            .repository
+            .find_branch(branch)?
+            .get()
+            .name()?
+            .to_string();
+        let worktree = &self.repository.worktree;
+
+        let mut args: Vec<&str> = arguments.into_iter().collect();
+        args.push(&other_branch);
+        let command = args[0].to_string();
+        let had_conflicts = has_conflicts(worktree)?;
+
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .output()?;
+
+        if output.status.success() {
+            Ok(ConflictableCommandOutcome::Completed)
+        } else if !had_conflicts && has_conflicts(worktree)? {
+            Ok(ConflictableCommandOutcome::Conflicted)
+        } else {
+            Err(Error::CommandFailed {
+                command,
+                status: output.status,
+                message: command_message(&output.stdout, &output.stderr),
+            })
+        }
+    }
+}
+
 fn checked_out_branch(repository: &GitRepository) -> Result<Option<String>, Error> {
     match repository.head() {
         Ok(head) if head.is_branch() => Ok(Some(head.shorthand()?.to_string())),
@@ -231,6 +322,12 @@ fn checked_out_branch(repository: &GitRepository) -> Result<Option<String>, Erro
 
 fn has_conflicts(worktree: &Path) -> Result<bool, Error> {
     Ok(GitRepository::open(worktree)?.index()?.has_conflicts())
+}
+
+fn has_tracked_changes(repository: &GitRepository) -> Result<bool, Error> {
+    let mut options = StatusOptions::new();
+    options.include_untracked(false).include_ignored(false);
+    Ok(!repository.statuses(Some(&mut options))?.is_empty())
 }
 
 fn command_message(stdout: &[u8], stderr: &[u8]) -> String {
@@ -262,6 +359,12 @@ pub enum Error {
     CurrentBranchAsRebaseTarget,
     #[error("cannot operate in a bare repository")]
     BareRepository,
+    #[error("cannot perform this operation while a Git {0} operation is in progress")]
+    OperationInProgress(InProgressOperation),
+    #[error(
+        "cannot perform this operation with staged or unstaged tracked changes; commit or stash them first"
+    )]
+    TrackedChanges,
     #[error("git {command} failed with {status}: {message}")]
     CommandFailed {
         command: String,
@@ -285,6 +388,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use git2::build::CheckoutBuilder;
     use git2::{
@@ -293,7 +397,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use super::{Checkout, ConflictableCommandOutcome, Error, Repository};
+    use super::{Checkout, ConflictableCommandOutcome, Error, InProgressOperation, Repository};
 
     fn repository_with_branches() -> (TempDir, GitRepository) {
         let directory = TempDir::new().expect("temporary directory should be created");
@@ -339,6 +443,24 @@ mod tests {
             .expect("feature branch should be created");
         drop(commit);
 
+        (directory, repository)
+    }
+
+    fn repository_with_tracked_file() -> (TempDir, GitRepository) {
+        let (directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        commit_file(
+            &repository,
+            "refs/heads/main",
+            initial,
+            "tracked.txt",
+            "original\n",
+        );
+        force_checkout_head(&repository);
         (directory, repository)
     }
 
@@ -430,6 +552,112 @@ mod tests {
     }
 
     #[test]
+    fn refuses_to_discover_bare_repository() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        GitRepository::init_bare(directory.path()).expect("bare repository should be created");
+
+        let error = Repository::discover(directory.path())
+            .err()
+            .expect("bare repository should be rejected");
+
+        assert!(matches!(error, Error::BareRepository));
+    }
+
+    #[test]
+    fn categorises_every_in_progress_repository_state() {
+        let states = [
+            (RepositoryState::Clean, None),
+            (RepositoryState::Merge, Some(InProgressOperation::Merge)),
+            (RepositoryState::Revert, Some(InProgressOperation::Revert)),
+            (
+                RepositoryState::RevertSequence,
+                Some(InProgressOperation::Revert),
+            ),
+            (
+                RepositoryState::CherryPick,
+                Some(InProgressOperation::CherryPick),
+            ),
+            (
+                RepositoryState::CherryPickSequence,
+                Some(InProgressOperation::CherryPick),
+            ),
+            (RepositoryState::Bisect, Some(InProgressOperation::Bisect)),
+            (RepositoryState::Rebase, Some(InProgressOperation::Rebase)),
+            (
+                RepositoryState::RebaseInteractive,
+                Some(InProgressOperation::Rebase),
+            ),
+            (
+                RepositoryState::RebaseMerge,
+                Some(InProgressOperation::Rebase),
+            ),
+            (
+                RepositoryState::ApplyMailbox,
+                Some(InProgressOperation::MailboxApply),
+            ),
+            (
+                RepositoryState::ApplyMailboxOrRebase,
+                Some(InProgressOperation::MailboxApplyOrRebase),
+            ),
+        ];
+
+        assert!(states.into_iter().all(|(state, expected)| {
+            InProgressOperation::from_repository_state(state) == expected
+        }));
+    }
+
+    #[test]
+    fn tracked_unstaged_changes_prevent_head_operations() {
+        let (directory, repository) = repository_with_tracked_file();
+        fs::write(directory.path().join("tracked.txt"), "modified\n")
+            .expect("tracked file should be modified");
+
+        let error = Repository::new(repository)
+            .into_head_operation()
+            .err()
+            .expect("unstaged changes should be rejected");
+
+        assert!(matches!(error, Error::TrackedChanges));
+    }
+
+    #[test]
+    fn tracked_staged_changes_prevent_head_operations() {
+        let (directory, repository) = repository_with_tracked_file();
+        fs::write(directory.path().join("tracked.txt"), "modified\n")
+            .expect("tracked file should be modified");
+        {
+            let mut index = repository.index().expect("index should open");
+            index
+                .add_path(Path::new("tracked.txt"))
+                .expect("tracked file should be staged");
+            index.write().expect("index should be written");
+        }
+
+        let error = Repository::new(repository)
+            .into_head_operation()
+            .err()
+            .expect("staged changes should be rejected");
+
+        assert!(matches!(error, Error::TrackedChanges));
+    }
+
+    #[test]
+    fn untracked_and_ignored_files_allow_head_operations() {
+        let (directory, repository) = repository_with_branches();
+        repository
+            .add_ignore_rule("/ignored.txt")
+            .expect("ignore rule should be added");
+        fs::write(directory.path().join("untracked.txt"), "untracked\n")
+            .expect("untracked file should be written");
+        fs::write(directory.path().join("ignored.txt"), "ignored\n")
+            .expect("ignored file should be written");
+
+        Repository::new(repository)
+            .into_head_operation()
+            .expect("untracked and ignored files should be allowed");
+    }
+
+    #[test]
     fn lists_local_branches_in_name_order_and_marks_current_branch() {
         let (_directory, repository) = repository_with_branches();
         let branches = Repository::new(repository)
@@ -492,6 +720,30 @@ mod tests {
             .err()
             .expect("feature branch should no longer exist");
         assert_eq!(error.code(), ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn deletes_branch_with_tracked_worktree_changes() {
+        let (directory, repository) = repository_with_tracked_file();
+        fs::write(directory.path().join("tracked.txt"), "modified\n")
+            .expect("tracked file should be modified");
+        let repository = Repository::new(repository);
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+
+        repository
+            .delete_branch(&feature)
+            .expect("dirty worktree should not prevent branch deletion");
+
+        assert_eq!(
+            fs::read_to_string(directory.path().join("tracked.txt"))
+                .expect("tracked file should remain"),
+            "modified\n"
+        );
     }
 
     #[test]
@@ -581,6 +833,9 @@ mod tests {
             .into_iter()
             .find(|branch| branch.name() == "feature")
             .expect("feature branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
 
         repository
             .switch_to(&feature)
@@ -604,6 +859,9 @@ mod tests {
             .into_iter()
             .find(|branch| branch.name() == "feature")
             .expect("feature branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
 
         let error = repository
             .switch_to(&feature)
@@ -636,6 +894,9 @@ mod tests {
             .into_iter()
             .find(|branch| branch.name() == "feature")
             .expect("feature branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("untracked files should allow HEAD operations");
 
         repository
             .switch_to(&feature)
@@ -677,6 +938,9 @@ mod tests {
             .into_iter()
             .find(|branch| branch.name() == "feature")
             .expect("feature branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
 
         let outcome = repository
             .merge_from(&feature)
@@ -684,7 +948,12 @@ mod tests {
 
         assert_eq!(outcome, ConflictableCommandOutcome::Completed);
         assert_eq!(
-            repository.inner.head().expect("HEAD should exist").target(),
+            repository
+                .repository
+                .inner
+                .head()
+                .expect("HEAD should exist")
+                .target(),
             Some(feature_tip)
         );
         assert_eq!(
@@ -704,6 +973,9 @@ mod tests {
             .into_iter()
             .find(|branch| branch.name() == "main")
             .expect("main branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
 
         let error = repository
             .merge_from(&main)
@@ -730,6 +1002,9 @@ mod tests {
             .into_iter()
             .find(|branch| branch.name() == "feature")
             .expect("feature branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
 
         let error = repository
             .merge_from(&feature)
@@ -768,18 +1043,23 @@ mod tests {
             .into_iter()
             .find(|branch| branch.name() == "feature")
             .expect("feature branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
 
         let outcome = repository
             .rebase_onto(&feature)
             .expect("rebase should succeed");
 
         let new_main_tip = repository
+            .repository
             .inner
             .head()
             .expect("HEAD should exist")
             .target()
             .expect("HEAD should have a target");
         let new_main = repository
+            .repository
             .inner
             .find_commit(new_main_tip)
             .expect("rebased commit should exist");
@@ -817,6 +1097,14 @@ mod tests {
             "shared.txt",
             "main\n",
         );
+        {
+            let initial = repository
+                .find_commit(initial)
+                .expect("initial commit should exist");
+            repository
+                .branch("unrelated", &initial, false)
+                .expect("unrelated branch should be created");
+        }
         force_checkout_head(&repository);
         let repository = Repository::new(repository);
         let feature = repository
@@ -825,6 +1113,9 @@ mod tests {
             .into_iter()
             .find(|branch| branch.name() == "feature")
             .expect("feature branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
 
         let outcome = repository
             .rebase_onto(&feature)
@@ -832,7 +1123,7 @@ mod tests {
 
         assert_eq!(outcome, ConflictableCommandOutcome::Conflicted);
         assert!(matches!(
-            repository.inner.state(),
+            repository.repository.inner.state(),
             RepositoryState::RebaseMerge | RepositoryState::RebaseInteractive
         ));
         assert!(
@@ -842,5 +1133,26 @@ mod tests {
                 .expect("index should open")
                 .has_conflicts()
         );
+
+        let repository = Repository::discover(directory.path())
+            .expect("active rebase should still allow branch deletion");
+        let unrelated = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "unrelated")
+            .expect("unrelated branch should exist");
+        repository
+            .delete_branch(&unrelated)
+            .expect("active rebase should allow unrelated branch deletion");
+
+        let error = repository
+            .into_head_operation()
+            .err()
+            .expect("active rebase should prevent HEAD operations");
+        assert!(matches!(
+            error,
+            Error::OperationInProgress(InProgressOperation::Rebase)
+        ));
     }
 }

@@ -1,10 +1,10 @@
 use crate::{
     Error,
-    git::{self, ConflictableCommandOutcome, Repository},
+    git::{self, ConflictableCommandOutcome, HeadOperationRepository},
     ui::{self, App, SingleOperation},
 };
 
-pub fn run(repository: &Repository) -> Result<(), Error> {
+pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
     let current_branch = repository
         .current_branch()?
         .ok_or(git::Error::DetachedHeadForMerge)?;

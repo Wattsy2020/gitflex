@@ -29,9 +29,9 @@ fn run() -> Result<(), gitbranch::Error> {
 
     match command {
         Command::Clean => gitbranch::run_clean(&repository)?,
-        Command::Switch => gitbranch::run_switch(&repository)?,
-        Command::Rebase => gitbranch::run_rebase(&repository)?,
-        Command::Merge => gitbranch::run_merge(&repository)?,
+        Command::Switch => gitbranch::run_switch(&repository.into_head_operation()?)?,
+        Command::Rebase => gitbranch::run_rebase(&repository.into_head_operation()?)?,
+        Command::Merge => gitbranch::run_merge(&repository.into_head_operation()?)?,
     }
 
     Ok(())

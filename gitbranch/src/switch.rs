@@ -1,10 +1,10 @@
 use crate::{
     Error,
-    git::Repository,
+    git::HeadOperationRepository,
     ui::{self, App, SingleOperation},
 };
 
-pub fn run(repository: &Repository) -> Result<(), Error> {
+pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
     let branches = repository.local_branches()?;
     let Some(app) = App::single(branches, SingleOperation::Switch) else {
         println!("No branches available to switch to.");
