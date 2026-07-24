@@ -308,13 +308,23 @@ impl<M> App<M> {
     }
 
     fn next(&mut self) {
-        let position = (self.position() + 1).min(self.branches.len() - 1);
-        self.state.select(Some(position));
+        let current = self.position();
+        let new_pos = if current == self.branches.len() - 1 {
+            0
+        } else {
+            current + 1
+        };
+        self.state.select(Some(new_pos));
     }
 
     fn previous(&mut self) {
-        let position = self.position().saturating_sub(1);
-        self.state.select(Some(position));
+        let current = self.position();
+        let new_pos = if current == 0 {
+            self.branches.len() - 1
+        } else {
+            current - 1
+        };
+        self.state.select(Some(new_pos));
     }
 
     fn toggle(&mut self)
