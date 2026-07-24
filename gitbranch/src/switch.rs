@@ -1,12 +1,12 @@
 use crate::{
     Error,
     git::HeadOperationRepository,
-    ui::{self, App},
+    ui::{self, AppImpl},
 };
 
 pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
     let branches = repository.local_branches()?;
-    let Some(app) = App::switch(branches) else {
+    let Some(app) = AppImpl::switch(branches) else {
         println!("No branches available to switch to.");
         return Ok(());
     };

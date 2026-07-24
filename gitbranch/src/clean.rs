@@ -1,12 +1,12 @@
 use crate::{
     Error,
     git::Repository,
-    ui::{self, App},
+    ui::{self, AppImpl},
 };
 
 pub fn run(repository: &Repository) -> Result<(), Error> {
     let branches = repository.local_branches()?;
-    let Some(app) = App::clean(branches) else {
+    let Some(app) = AppImpl::clean(branches) else {
         println!("No deletable branches found.");
         return Ok(());
     };

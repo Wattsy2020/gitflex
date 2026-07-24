@@ -9,13 +9,13 @@ const HISTORY_FILE_NAME: &str = "gitbranch-rebases";
 const LOCK_FILE_NAME: &str = "gitbranch-rebases.lock";
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct RebaseRecord {
+pub struct RebaseRecord {
     source: String,
     target: String,
 }
 
 impl RebaseRecord {
-    pub(crate) fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
+    pub fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
             source: source.into(),
             target: target.into(),
@@ -24,24 +24,24 @@ impl RebaseRecord {
 }
 
 #[derive(Debug)]
-pub(crate) struct RebaseHistoryStore {
+pub struct RebaseHistoryStore {
     history_path: PathBuf,
     lock_path: PathBuf,
 }
 
 impl RebaseHistoryStore {
-    pub(crate) fn new(common_directory: &Path) -> Self {
+    pub fn new(common_directory: &Path) -> Self {
         Self {
             history_path: common_directory.join(HISTORY_FILE_NAME),
             lock_path: common_directory.join(LOCK_FILE_NAME),
         }
     }
 
-    pub(crate) fn target_for(&self, source: &str) -> io::Result<Option<String>> {
+    pub fn target_for(&self, source: &str) -> io::Result<Option<String>> {
         Ok(self.load()?.target_for(source).map(str::to_owned))
     }
 
-    pub(crate) fn record(&self, record: RebaseRecord) -> io::Result<()> {
+    pub fn record(&self, record: RebaseRecord) -> io::Result<()> {
         let mut lock = LockFile::create(&self.lock_path)?;
         let mut history = self.load()?;
         history.record(record);

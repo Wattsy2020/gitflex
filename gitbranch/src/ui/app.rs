@@ -1,13 +1,5 @@
-use std::io;
-
-use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
-use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::{
-    DefaultTerminal, Frame,
+    Frame,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -16,8 +8,33 @@ use ratatui::{
 
 use crate::git::{Checkout, LocalBranch};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Confirmation {
+    Plain,
+    Modified,
+}
+
+/// Instructions the UI sends to the App
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Action {
+    Next,
+    Previous,
+    Toggle,
+    Confirm(Confirmation),
+    Cancel,
+}
+
+/// Tells the UI the result of an App operation
+#[derive(Debug, Eq, PartialEq)]
+pub enum Transition<T> {
+    Continue,
+    Complete(T),
+    Cancel,
+}
+
+/// Define modes: the type of operation an app can do
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum SingleOperation {
+pub enum SingleOperation {
     Switch,
     Rebase { last_target: Option<String> },
     Merge,
@@ -27,28 +44,6 @@ pub struct CleanMode;
 
 pub struct SingleMode {
     operation: SingleOperation,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Confirmation {
-    Plain,
-    Modified,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Action {
-    Next,
-    Previous,
-    Toggle,
-    Confirm(Confirmation),
-    Cancel,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum Transition<T> {
-    Continue,
-    Complete(T),
-    Cancel,
 }
 
 trait Mode {
@@ -191,6 +186,7 @@ impl Branch {
 
     fn branch_text<M: Mode>(&self, mode: &M) -> String {
         let marker = mode.marker(self);
+        let name = self.branch.name();
         let annotation = mode.annotation(&self.branch).unwrap_or_default();
         let status = match self.branch.checkout() {
             Checkout::Available => "",
@@ -198,7 +194,7 @@ impl Branch {
             Checkout::OtherWorktree => " (other worktree)",
         };
 
-        format!("{marker}{}{status}{annotation}", self.branch.name())
+        format!("{marker}{name}{status}{annotation}")
     }
 
     fn color<M: Mode>(&self, mode: &M, highlighted: bool) -> Color {
@@ -223,19 +219,19 @@ impl Branch {
     }
 }
 
-pub struct App<M> {
+pub struct AppImpl<M> {
     branches: Vec<Branch>,
     mode: M,
     state: ListState,
 }
 
-impl App<CleanMode> {
+impl AppImpl<CleanMode> {
     pub fn clean(branches: Vec<LocalBranch>) -> Option<Self> {
         Self::new(branches, CleanMode)
     }
 }
 
-impl App<SingleMode> {
+impl AppImpl<SingleMode> {
     pub fn switch(branches: Vec<LocalBranch>) -> Option<Self> {
         Self::new(
             branches,
@@ -274,7 +270,7 @@ impl App<SingleMode> {
     }
 }
 
-impl<M> App<M> {
+impl<M> AppImpl<M> {
     fn new(branches: Vec<LocalBranch>, mode: M) -> Option<Self>
     where
         M: Mode,
@@ -401,91 +397,37 @@ impl<M> App<M> {
     }
 }
 
-/// Enables enhanced key reporting when supported and restores the terminal mode on drop.
-struct KeyboardEnhancementGuard;
+pub trait App {
+    type Output;
+    fn update(&mut self, action: Action) -> Transition<Self::Output>;
+    fn draw(&mut self, frame: &mut Frame);
+}
 
-impl KeyboardEnhancementGuard {
-    fn try_enable() -> Option<Self> {
-        supports_keyboard_enhancement()
-            .unwrap_or(false)
-            .then(|| {
-                execute!(
-                    io::stdout(),
-                    PushKeyboardEnhancementFlags(
-                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                            | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
-                    )
-                )
-            })
-            .and_then(Result::ok)
-            .map(|()| Self)
+impl App for AppImpl<CleanMode> {
+    type Output = Vec<LocalBranch>;
+    fn update(&mut self, action: Action) -> Transition<Self::Output> {
+        self.update(action)
+    }
+    fn draw(&mut self, frame: &mut Frame) {
+        self.draw(frame);
     }
 }
 
-impl Drop for KeyboardEnhancementGuard {
-    fn drop(&mut self) {
-        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+impl App for AppImpl<SingleMode> {
+    type Output = LocalBranch;
+    fn update(&mut self, action: Action) -> Transition<Self::Output> {
+        self.update(action)
     }
-}
-
-fn action_from_key(key: event::KeyEvent) -> Option<Action> {
-    if key.kind != KeyEventKind::Press {
-        return None;
+    fn draw(&mut self, frame: &mut Frame) {
+        self.draw(frame);
     }
-
-    match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => Some(Action::Cancel),
-        KeyCode::Down | KeyCode::Char('j') => Some(Action::Next),
-        KeyCode::Up | KeyCode::Char('k') => Some(Action::Previous),
-        KeyCode::Char(' ') => Some(Action::Toggle),
-        KeyCode::Enter => Some(Action::Confirm(
-            if key
-                .modifiers
-                .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
-            {
-                Confirmation::Modified
-            } else {
-                Confirmation::Plain
-            },
-        )),
-        _ => None,
-    }
-}
-
-fn run<M: Mode>(terminal: &mut DefaultTerminal, app: &mut App<M>) -> io::Result<Option<M::Output>> {
-    let _keyboard_enhancements = KeyboardEnhancementGuard::try_enable();
-
-    loop {
-        terminal.draw(|frame| app.draw(frame))?;
-
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        let Some(action) = action_from_key(key) else {
-            continue;
-        };
-
-        match app.update(action) {
-            Transition::Continue => {}
-            Transition::Complete(output) => return Ok(Some(output)),
-            Transition::Cancel => return Ok(None),
-        }
-    }
-}
-
-pub fn select_many(mut app: App<CleanMode>) -> io::Result<Option<Vec<LocalBranch>>> {
-    ratatui::run(|terminal| run(terminal, &mut app))
-}
-
-pub fn select_one(mut app: App<SingleMode>) -> io::Result<Option<LocalBranch>> {
-    ratatui::run(|terminal| run(terminal, &mut app))
 }
 
 #[cfg(test)]
 mod tests {
     use crate::git::{Checkout, LocalBranch};
 
-    use super::{Action, App, Confirmation, Transition};
+    use super::{Action, AppImpl, Confirmation, Transition};
 
     fn branch(name: &str, checkout: Checkout) -> LocalBranch {
         LocalBranch::for_test(name, checkout)
@@ -493,7 +435,7 @@ mod tests {
 
     #[test]
     fn clean_starts_with_every_deletable_branch_selected() {
-        let mut app = App::clean(vec![
+        let mut app = AppImpl::clean(vec![
             branch("feature-a", Checkout::Available),
             branch("feature-b", Checkout::Available),
             branch("main", Checkout::CurrentWorktree),
@@ -512,7 +454,7 @@ mod tests {
 
     #[test]
     fn clean_requires_modified_confirmation_and_toggle_changes_selection() {
-        let mut app = App::clean(vec![
+        let mut app = AppImpl::clean(vec![
             branch("feature-a", Checkout::Available),
             branch("feature-b", Checkout::Available),
         ])
@@ -536,7 +478,7 @@ mod tests {
 
     #[test]
     fn single_selection_navigates_and_confirms_the_highlighted_branch() {
-        let mut app = App::rebase(
+        let mut app = AppImpl::rebase(
             vec![
                 branch("feature-a", Checkout::Available),
                 branch("feature-b", Checkout::Available),
@@ -555,7 +497,7 @@ mod tests {
 
     #[test]
     fn single_selection_rejects_an_ineligible_highlighted_branch() {
-        let mut app = App::switch(vec![
+        let mut app = AppImpl::switch(vec![
             branch("feature", Checkout::Available),
             branch("main", Checkout::CurrentWorktree),
         ])
@@ -570,7 +512,7 @@ mod tests {
 
     #[test]
     fn merge_selects_a_branch_checked_out_in_another_worktree() {
-        let mut app = App::merge(vec![
+        let mut app = AppImpl::merge(vec![
             branch("main", Checkout::CurrentWorktree),
             branch("feature", Checkout::OtherWorktree),
         ])
@@ -584,14 +526,14 @@ mod tests {
 
     #[test]
     fn cancellation_exits_without_a_selection() {
-        let mut app = App::switch(vec![branch("feature", Checkout::Available)]).unwrap();
+        let mut app = AppImpl::switch(vec![branch("feature", Checkout::Available)]).unwrap();
 
         assert_eq!(app.update(Action::Cancel), Transition::Cancel);
     }
 
     #[test]
     fn rebase_promotes_selects_and_labels_the_last_target() {
-        let mut app = App::rebase(
+        let mut app = AppImpl::rebase(
             vec![
                 branch("release", Checkout::Available),
                 branch("feature", Checkout::CurrentWorktree),
@@ -622,7 +564,7 @@ mod tests {
 
     #[test]
     fn rebase_ignores_a_stale_last_target() {
-        let app = App::rebase(
+        let app = AppImpl::rebase(
             vec![
                 branch("main", Checkout::Available),
                 branch("feature", Checkout::CurrentWorktree),
