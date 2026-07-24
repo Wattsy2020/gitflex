@@ -11,7 +11,7 @@ use git2::{
 };
 use thiserror::Error;
 
-use crate::rebase_history::{RebaseHistoryStore, RebaseRecord};
+use super::rebase_history::{RebaseHistoryStore, RebaseRecord};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Checkout {
