@@ -1,7 +1,10 @@
 use crate::{
     Error,
     git::{self, ConflictableCommandOutcome, HeadOperationRepository},
-    ui::{self, AppImpl},
+    ui::{
+        self,
+        Selection::{Cancelled, Selected, Unavailable},
+    },
 };
 
 pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
@@ -10,14 +13,11 @@ pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
         .ok_or(git::Error::DetachedHeadForMerge)?;
 
     let branches = repository.local_branches()?;
-    let Some(app) = AppImpl::merge(branches) else {
-        println!("No branches available to merge.");
-        return Ok(());
-    };
 
-    match ui::select_one(app)? {
-        None => println!("Cancelled."),
-        Some(branch) => match repository.merge_from(&branch)? {
+    match ui::run_merge_app(branches)? {
+        Unavailable => println!("No branches available to merge."),
+        Cancelled => println!("Cancelled."),
+        Selected(branch) => match repository.merge_from(&branch)? {
             ConflictableCommandOutcome::Completed => {
                 println!("Merged {} into {current_branch}.", branch.name());
             }

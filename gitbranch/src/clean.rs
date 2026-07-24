@@ -1,19 +1,18 @@
 use crate::{
     Error,
     git::Repository,
-    ui::{self, AppImpl},
+    ui::{
+        self,
+        Selection::{Cancelled, Selected, Unavailable},
+    },
 };
 
 pub fn run(repository: &Repository) -> Result<(), Error> {
     let branches = repository.local_branches()?;
-    let Some(app) = AppImpl::clean(branches) else {
-        println!("No deletable branches found.");
-        return Ok(());
-    };
-
-    match ui::select_many(app)? {
-        None => println!("Cancelled."),
-        Some(branches) => {
+    match ui::run_clean_app(branches)? {
+        Unavailable => println!("No deletable branches found."),
+        Cancelled => println!("Cancelled."),
+        Selected(branches) => {
             for branch in branches {
                 match repository.delete_branch(&branch) {
                     Ok(()) => println!("Deleted branch {}.", branch.name()),

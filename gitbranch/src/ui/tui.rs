@@ -12,8 +12,7 @@ use ratatui::{
     },
 };
 
-use super::app::{Action, App, AppImpl, CleanMode, Confirmation, SingleMode, Transition};
-use crate::git::LocalBranch;
+use super::app::{Action, App, Confirmation, Transition};
 
 /// Enables enhanced key reporting when supported and restores the terminal mode on drop.
 struct KeyboardEnhancementGuard;
@@ -66,7 +65,10 @@ fn action_from_key(key: event::KeyEvent) -> Option<Action> {
     }
 }
 
-fn run<A: App>(terminal: &mut DefaultTerminal, app: &mut A) -> io::Result<Option<A::Output>> {
+fn run_with_terminal<A: App>(
+    terminal: &mut DefaultTerminal,
+    app: &mut A,
+) -> io::Result<Option<A::Output>> {
     let _keyboard_enhancements = KeyboardEnhancementGuard::try_enable();
 
     loop {
@@ -87,10 +89,6 @@ fn run<A: App>(terminal: &mut DefaultTerminal, app: &mut A) -> io::Result<Option
     }
 }
 
-pub fn select_many(mut app: AppImpl<CleanMode>) -> io::Result<Option<Vec<LocalBranch>>> {
-    ratatui::run(|terminal| run(terminal, &mut app))
-}
-
-pub fn select_one(mut app: AppImpl<SingleMode>) -> io::Result<Option<LocalBranch>> {
-    ratatui::run(|terminal| run(terminal, &mut app))
+pub fn run<A: App>(mut app: A) -> io::Result<Option<A::Output>> {
+    ratatui::run(|terminal| run_with_terminal(terminal, &mut app))
 }

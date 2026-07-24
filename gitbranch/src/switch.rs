@@ -1,19 +1,19 @@
 use crate::{
     Error,
     git::HeadOperationRepository,
-    ui::{self, AppImpl},
+    ui::{
+        self,
+        Selection::{Cancelled, Selected, Unavailable},
+    },
 };
 
 pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
     let branches = repository.local_branches()?;
-    let Some(app) = AppImpl::switch(branches) else {
-        println!("No branches available to switch to.");
-        return Ok(());
-    };
 
-    match ui::select_one(app)? {
-        None => println!("Cancelled."),
-        Some(branch) => {
+    match ui::run_switch_app(branches)? {
+        Unavailable => println!("No branches available to switch to."),
+        Cancelled => println!("Cancelled."),
+        Selected(branch) => {
             repository.switch_to(&branch)?;
             println!("Switched to branch {}.", branch.name());
         }
