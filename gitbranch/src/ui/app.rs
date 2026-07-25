@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
@@ -226,6 +228,7 @@ impl Branch {
 pub struct AppImpl<M> {
     branches: Vec<Branch>,
     mode: M,
+    selectable_count: NonZeroUsize,
     state: ListState,
 }
 
@@ -275,10 +278,17 @@ impl AppImpl<SingleMode> {
 }
 
 impl<M> AppImpl<M> {
-    fn new(branches: Vec<LocalBranch>, mode: M) -> Option<Self>
+    fn new(mut branches: Vec<LocalBranch>, mode: M) -> Option<Self>
     where
         M: Mode,
     {
+        branches.sort_by_key(|branch| !mode.is_selectable(branch));
+        let selectable_count = NonZeroUsize::new(
+            branches
+                .iter()
+                .take_while(|branch| mode.is_selectable(branch))
+                .count(),
+        )?;
         let branches = branches
             .into_iter()
             .map(|branch| Branch::new(branch, &mode))
@@ -286,9 +296,10 @@ impl<M> AppImpl<M> {
         let mut app = Self {
             branches,
             mode,
+            selectable_count,
             state: ListState::default(),
         };
-        app.state.select(Some(app.first_selectable()?));
+        app.state.select(Some(0));
         Some(app)
     }
 
@@ -298,32 +309,16 @@ impl<M> AppImpl<M> {
             .expect("a list element is always selected")
     }
 
-    fn first_selectable(&self) -> Option<usize>
-    where
-        M: Mode,
-    {
-        self.branches
-            .iter()
-            .position(|branch| self.mode.is_selectable(&branch.branch))
-    }
-
     fn next(&mut self) {
-        let current = self.position();
-        let new_pos = if current == self.branches.len() - 1 {
-            0
-        } else {
-            current + 1
-        };
+        let new_pos = (self.position() + 1) % self.selectable_count.get();
         self.state.select(Some(new_pos));
     }
 
     fn previous(&mut self) {
-        let current = self.position();
-        let new_pos = if current == 0 {
-            self.branches.len() - 1
-        } else {
-            current - 1
-        };
+        let new_pos = self
+            .position()
+            .checked_sub(1)
+            .unwrap_or(self.selectable_count.get() - 1);
         self.state.select(Some(new_pos));
     }
 
@@ -437,6 +432,13 @@ mod tests {
         LocalBranch::for_test(name, checkout)
     }
 
+    fn branch_names<M>(app: &AppImpl<M>) -> Vec<&str> {
+        app.branches
+            .iter()
+            .map(|branch| branch.branch.name())
+            .collect()
+    }
+
     #[test]
     fn clean_starts_with_every_deletable_branch_selected() {
         let mut app = AppImpl::clean(vec![
@@ -500,18 +502,60 @@ mod tests {
     }
 
     #[test]
-    fn single_selection_rejects_an_ineligible_highlighted_branch() {
+    fn commands_put_unselectable_branches_last() {
+        let branches = || {
+            vec![
+                branch("develop", Checkout::Available),
+                branch("feature", Checkout::OtherWorktree),
+                branch("main", Checkout::CurrentWorktree),
+                branch("release", Checkout::Available),
+            ]
+        };
+
+        let clean = AppImpl::clean(branches()).unwrap();
+        assert_eq!(
+            branch_names(&clean),
+            ["develop", "release", "feature", "main"]
+        );
+
+        let switch = AppImpl::switch(branches()).unwrap();
+        assert_eq!(
+            branch_names(&switch),
+            ["develop", "release", "feature", "main"]
+        );
+
+        let rebase = AppImpl::rebase(branches(), None).unwrap();
+        assert_eq!(
+            branch_names(&rebase),
+            ["develop", "feature", "release", "main"]
+        );
+
+        let merge = AppImpl::merge(branches()).unwrap();
+        assert_eq!(
+            branch_names(&merge),
+            ["develop", "feature", "release", "main"]
+        );
+    }
+
+    #[test]
+    fn navigation_wraps_without_highlighting_unselectable_branches() {
         let mut app = AppImpl::switch(vec![
+            branch("develop", Checkout::Available),
             branch("feature", Checkout::Available),
             branch("main", Checkout::CurrentWorktree),
         ])
         .unwrap();
-        assert_eq!(app.update(Action::Next), Transition::Continue);
 
-        assert_eq!(
-            app.update(Action::Confirm(Confirmation::Plain)),
-            Transition::Continue
-        );
+        assert_eq!(app.position(), 0);
+        assert_eq!(app.update(Action::Next), Transition::Continue);
+        assert_eq!(app.position(), 1);
+        assert_eq!(app.update(Action::Next), Transition::Continue);
+        assert_eq!(app.position(), 0);
+
+        assert_eq!(app.update(Action::Previous), Transition::Continue);
+        assert_eq!(app.position(), 1);
+        assert_eq!(app.update(Action::Previous), Transition::Continue);
+        assert_eq!(app.position(), 0);
     }
 
     #[test]
@@ -553,7 +597,7 @@ mod tests {
                 .iter()
                 .map(|branch| branch.branch.name())
                 .collect::<Vec<_>>(),
-            ["main", "develop", "feature", "release"]
+            ["main", "develop", "release", "feature"]
         );
         assert_eq!(
             app.branches[0].branch_text(&app.mode),
@@ -564,6 +608,25 @@ mod tests {
             panic!("the remembered target should be initially selected");
         };
         assert_eq!(branch.name(), "main");
+    }
+
+    #[test]
+    fn rebase_keeps_an_unselectable_last_target_at_the_bottom() {
+        let app = AppImpl::rebase(
+            vec![
+                branch("develop", Checkout::Available),
+                branch("feature", Checkout::Available),
+                branch("main", Checkout::CurrentWorktree),
+            ],
+            Some("main".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(branch_names(&app), ["develop", "feature", "main"]);
+        assert_eq!(
+            app.branches[2].branch_text(&app.mode),
+            "main (current) (last rebased onto)"
+        );
     }
 
     #[test]
@@ -583,7 +646,7 @@ mod tests {
                 .iter()
                 .map(|branch| branch.branch_text(&app.mode))
                 .collect::<Vec<_>>(),
-            ["develop", "feature (current)", "main"]
+            ["develop", "main", "feature (current)"]
         );
     }
 }
