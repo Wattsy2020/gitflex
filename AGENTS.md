@@ -1,6 +1,13 @@
 This repository contains a collection of tools for personal use, thus the tools are quite specialised for my needs and don't need to be configurable.
 
 The repository is solely written in Rust. 
+Each tool is an independent Rust crate, the git root directory doesn't have a Cargo.toml, only its children project have one.
+Run validation from every modified crate directory:
+
+cargo fmt --check &&
+cargo test --locked &&
+cargo clippy --all-targets --locked -- -D warnings
+
 Write clean and idiomatic Rust code that is readable and maintainable by humans.
 Make illegal states unrepresentable by modelling invariants in the type system (e.g. as enums / structs / traits) and enforcing them at API boundaries. 
 When behavior, accepted inputs, or return types depend on a mode or state, prefer typestate, generic parameters, associated types, or mode-specific constructors and functions.
@@ -17,9 +24,6 @@ Use libraries where relevant, both those already in the cargo.toml and other use
 
 If you see something that could be changed that would clearly improve the codebase, change it.
 
-Each tool is an independent Rust crate, the git root directory doesn't have a Cargo.toml, only its children project have one.
-Run validation from every modified crate directory:
+Consider what errors to expose to the user. If our tool can still accomplish the users intent, e.g. delete a branch or switch or rebase, then there is no need to expose a minor error such as the user's email not being configured, or failing to read/write an internal file.
 
-cargo fmt --check &&
-cargo test --locked &&
-cargo clippy --all-targets --locked -- -D warnings
+For the gitbranch tool, when adding new features that query or use libgit2, add an integration test in tests/git.rs as well

@@ -117,6 +117,26 @@ impl TestRepository {
         self.git_success(&["commit", "-m", message]);
     }
 
+    fn commit_file_as(
+        &self,
+        path: &str,
+        contents: &str,
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) {
+        fs::write(self.path.join(path), contents).expect("file should be written");
+        self.git_success(&["add", "--", path]);
+        let output = self
+            .command_at(&self.path)
+            .env("GIT_AUTHOR_NAME", author_name)
+            .env("GIT_AUTHOR_EMAIL", author_email)
+            .args(["commit", "-m", message])
+            .output()
+            .expect("git should be available on PATH");
+        assert_success(&["commit", "-m", message], &output);
+    }
+
     fn discover(&self) -> Repository {
         Repository::discover(&self.path).expect("repository should be discovered")
     }
@@ -162,6 +182,48 @@ fn deletes_branch_created_by_git_cli() {
         test_repository.git_stdout(&["branch", "--show-current"]),
         "main"
     );
+}
+
+#[test]
+fn describes_clean_branches_created_by_git_cli() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("merged");
+
+    test_repository.create_branch("own-feature");
+    test_repository.switch_to("own-feature");
+    test_repository.commit_file("own.txt", "own\n", "Add own change");
+
+    test_repository.switch_to("main");
+    test_repository.create_branch("review");
+    test_repository.switch_to("review");
+    test_repository.commit_file_as(
+        "review.txt",
+        "review\n",
+        "Add reviewed change",
+        "Reviewer",
+        "reviewer@example.com",
+    );
+    test_repository.switch_to("main");
+
+    let branches = test_repository
+        .discover()
+        .clean_branches()
+        .expect("clean branches should be described");
+    let branch = |name: &str| {
+        branches
+            .iter()
+            .find(|branch| branch.name() == name)
+            .unwrap_or_else(|| panic!("branch {name} should exist"))
+    };
+
+    assert!(branch("main").is_trunk());
+    assert!(branch("main").is_merged());
+    assert!(!branch("merged").is_trunk());
+    assert!(branch("merged").is_merged());
+    assert!(!branch("own-feature").is_merged());
+    assert!(!branch("own-feature").is_authored_by_other());
+    assert!(!branch("review").is_merged());
+    assert!(branch("review").is_authored_by_other());
 }
 
 #[test]

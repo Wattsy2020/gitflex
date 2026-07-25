@@ -27,40 +27,11 @@ pub struct LocalBranch {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CleanBranch {
-    Selected(LocalBranch),
-    Unselected(LocalBranch),
-    Unselectable(LocalBranch),
-}
-
-impl CleanBranch {
-    pub fn name(&self) -> &str {
-        self.branch().name()
-    }
-
-    pub fn is_selectable(&self) -> bool {
-        !matches!(self, Self::Unselectable(_))
-    }
-
-    pub fn is_selected(&self) -> bool {
-        matches!(self, Self::Selected(_))
-    }
-
-    pub fn into_branch(self) -> LocalBranch {
-        match self {
-            Self::Selected(branch) | Self::Unselected(branch) | Self::Unselectable(branch) => {
-                branch
-            }
-        }
-    }
-
-    fn branch(&self) -> &LocalBranch {
-        match self {
-            Self::Selected(branch) | Self::Unselected(branch) | Self::Unselectable(branch) => {
-                branch
-            }
-        }
-    }
+pub struct CleanBranch {
+    branch: LocalBranch,
+    is_trunk: bool,
+    is_merged: bool,
+    is_authored_by_other: bool,
 }
 
 impl LocalBranch {
@@ -98,6 +69,56 @@ impl LocalBranch {
 
     pub fn is_merge_source(&self) -> bool {
         self.checkout != Checkout::CurrentWorktree
+    }
+}
+
+impl CleanBranch {
+    fn new(
+        branch: LocalBranch,
+        is_trunk: bool,
+        is_merged: bool,
+        is_authored_by_other: bool,
+    ) -> Self {
+        Self {
+            branch,
+            is_trunk,
+            is_merged,
+            is_authored_by_other,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        branch: LocalBranch,
+        is_trunk: bool,
+        is_merged: bool,
+        is_authored_by_other: bool,
+    ) -> Self {
+        Self::new(branch, is_trunk, is_merged, is_authored_by_other)
+    }
+
+    pub fn name(&self) -> &str {
+        self.branch.name()
+    }
+
+    pub fn branch(&self) -> &LocalBranch {
+        &self.branch
+    }
+
+    pub fn is_trunk(&self) -> bool {
+        self.is_trunk
+    }
+
+    pub fn is_merged(&self) -> bool {
+        self.is_merged
+    }
+
+    pub fn is_authored_by_other(&self) -> bool {
+        self.is_authored_by_other
+    }
+
+    pub fn into_branch(self) -> LocalBranch {
+        self.branch
     }
 }
 
@@ -226,37 +247,38 @@ impl Repository {
         let base_tip = base_name
             .map(|name| self.inner.refname_to_id(&format!("refs/heads/{name}")))
             .transpose()?;
-        let user_email = configured_user_email(&self.inner)?;
+
+        // ignore any errors when retrieving user email
+        // if the user hasn't configured their email then we will ignore that rule, and continue the UI flow
+        let user_email = configured_user_email(&self.inner).ok().flatten();
 
         branches
             .into_iter()
             .map(|branch| {
-                if !branch.is_deletable() || base_name == Some(branch.name()) {
-                    return Ok(CleanBranch::Unselectable(branch));
-                }
-
+                let is_trunk = base_name == Some(branch.name());
                 let tip = self
                     .find_branch(&branch)?
                     .into_reference()
                     .peel_to_commit()?;
-                let merged = match base_tip {
+                let is_merged = match base_tip {
                     Some(base_tip) => {
                         tip.id() == base_tip
                             || self.inner.graph_descendant_of(base_tip, tip.id())?
                     }
                     None => false,
                 };
-                let authored_by_other = user_email.as_deref().is_some_and(|user_email| {
+                let is_authored_by_other = user_email.as_deref().is_some_and(|user_email| {
                     tip.author()
                         .email()
                         .is_ok_and(|author_email| author_email != user_email)
                 });
 
-                Ok(if merged || authored_by_other {
-                    CleanBranch::Selected(branch)
-                } else {
-                    CleanBranch::Unselected(branch)
-                })
+                Ok(CleanBranch::new(
+                    branch,
+                    is_trunk,
+                    is_merged,
+                    is_authored_by_other,
+                ))
             })
             .collect()
     }
@@ -654,6 +676,13 @@ mod tests {
         (directory, worktree_directory, Repository::new(repository))
     }
 
+    fn clean_branch<'a>(branches: &'a [CleanBranch], name: &str) -> &'a CleanBranch {
+        branches
+            .iter()
+            .find(|branch| branch.name() == name)
+            .unwrap_or_else(|| panic!("clean branch {name} should exist"))
+    }
+
     #[test]
     fn discovers_repository_from_nested_directory() {
         let (directory, _) = repository_with_branches();
@@ -840,35 +869,41 @@ mod tests {
             .clean_branches()
             .expect("clean branches should be classified");
 
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "feature"),
-            Some(CleanBranch::Unselected(_))
-        ));
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "foreign"),
-            Some(CleanBranch::Selected(_))
-        ));
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "merged"),
-            Some(CleanBranch::Selected(_))
-        ));
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "main"),
-            Some(CleanBranch::Unselectable(_))
-        ));
+        let feature = clean_branch(&branches, "feature");
+        assert!(!feature.is_trunk());
+        assert!(!feature.is_merged());
+        assert!(!feature.is_authored_by_other());
+
+        let foreign = clean_branch(&branches, "foreign");
+        assert!(!foreign.is_trunk());
+        assert!(!foreign.is_merged());
+        assert!(foreign.is_authored_by_other());
+
+        let merged = clean_branch(&branches, "merged");
+        assert!(!merged.is_trunk());
+        assert!(merged.is_merged());
+        assert!(!merged.is_authored_by_other());
+
+        let main = clean_branch(&branches, "main");
+        assert!(main.is_trunk());
+        assert!(main.is_merged());
+        assert!(!main.is_authored_by_other());
     }
 
     #[test]
-    fn clean_protects_branches_checked_out_in_any_worktree() {
+    fn clean_branch_metadata_preserves_checkout_status() {
         let (_main_directory, _worktree_directory, repository) = initialise_worktree();
         let branches = repository
             .clean_branches()
             .expect("clean branches should be classified");
 
-        assert!(
-            branches
-                .iter()
-                .all(|branch| matches!(branch, CleanBranch::Unselectable(_)))
+        assert_eq!(
+            clean_branch(&branches, "feature").branch().checkout(),
+            Checkout::OtherWorktree
+        );
+        assert_eq!(
+            clean_branch(&branches, "main").branch().checkout(),
+            Checkout::CurrentWorktree
         );
     }
 
@@ -901,14 +936,10 @@ mod tests {
             .clean_branches()
             .expect("clean branches should be classified");
 
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "main"),
-            Some(CleanBranch::Unselectable(_))
-        ));
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "master"),
-            Some(CleanBranch::Unselected(_))
-        ));
+        assert!(clean_branch(&branches, "main").is_trunk());
+        let master = clean_branch(&branches, "master");
+        assert!(!master.is_trunk());
+        assert!(!master.is_merged());
 
         let (_directory, repository) = repository_with_branches();
         let initial = repository
@@ -928,14 +959,8 @@ mod tests {
             .clean_branches()
             .expect("clean branches should be classified");
 
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "feature"),
-            Some(CleanBranch::Selected(_))
-        ));
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "master"),
-            Some(CleanBranch::Unselectable(_))
-        ));
+        assert!(clean_branch(&branches, "feature").is_merged());
+        assert!(clean_branch(&branches, "master").is_trunk());
     }
 
     #[test]
@@ -958,10 +983,9 @@ mod tests {
             .clean_branches()
             .expect("clean branches should be classified");
 
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "feature"),
-            Some(CleanBranch::Unselected(_))
-        ));
+        let feature = clean_branch(&branches, "feature");
+        assert!(!feature.is_trunk());
+        assert!(!feature.is_merged());
 
         let (_directory, repository) = repository_with_branches();
         let initial = repository
@@ -995,14 +1019,8 @@ mod tests {
             .clean_branches()
             .expect("clean branches should be classified");
 
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "feature"),
-            Some(CleanBranch::Selected(_))
-        ));
-        assert!(matches!(
-            branches.iter().find(|branch| branch.name() == "foreign"),
-            Some(CleanBranch::Unselected(_))
-        ));
+        assert!(clean_branch(&branches, "feature").is_merged());
+        assert!(!clean_branch(&branches, "foreign").is_authored_by_other());
     }
 
     #[test]
