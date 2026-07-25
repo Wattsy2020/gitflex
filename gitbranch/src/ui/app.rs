@@ -161,21 +161,23 @@ struct Branch {
     branch: LocalBranch,
     selectable: bool,
     selected: bool,
+    original_rank: usize,
 }
 
 impl Branch {
-    fn new(branch: LocalBranch, selectable: bool, selected: bool) -> Self {
+    fn new(branch: LocalBranch, selectable: bool, selected: bool, original_rank: usize) -> Self {
         Self {
             branch,
             selectable,
             selected,
+            original_rank,
         }
     }
 
     fn clean(branch: CleanBranch) -> Self {
         let selectable = branch.branch().is_deletable() && !branch.is_trunk();
         let selected = selectable && (branch.is_merged() || branch.is_authored_by_other());
-        Self::new(branch.into_branch(), selectable, selected)
+        Self::new(branch.into_branch(), selectable, selected, 0)
     }
 
     pub fn name(&self) -> &str {
@@ -188,18 +190,22 @@ impl Branch {
         }
     }
 
-    #[cfg(test)]
-    fn branch_text<M: Mode>(&self, mode: &M) -> String {
-        let marker = mode.marker(self);
-        let name = self.name();
-        let annotation = mode.annotation(&self.branch).unwrap_or_default();
+    fn branch_annotation<M: Mode>(&self, mode: &M) -> String {
         let status = match self.branch.checkout() {
             Checkout::Available => "",
             Checkout::CurrentWorktree => " (current)",
             Checkout::OtherWorktree => " (other worktree)",
         };
+        let annotation = mode.annotation(&self.branch).unwrap_or_default();
+        format!("{status}{annotation}")
+    }
 
-        format!("{marker}{name}{status}{annotation}")
+    #[cfg(test)]
+    fn branch_text<M: Mode>(&self, mode: &M) -> String {
+        let marker = mode.marker(self);
+        let name = self.name();
+        let annotation = self.branch_annotation(mode);
+        format!("{marker}{name}{annotation}")
     }
 
     fn colour(&self, highlighted: bool) -> Color {
@@ -224,35 +230,27 @@ impl Branch {
         let matched_style = style
             .fg(MATCHED_COLOUR)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+
         let name = self.name();
         let mut spans = vec![Span::styled(mode.marker(self), style)];
         let mut position = 0;
 
+        // Add highlighted and non highlighted parts of the branch name
+        let mut add_styled =
+            |content: String, style: Style| spans.push(Span::styled(content, style));
+
         for matched_range in matched_ranges {
             if position < matched_range.start {
-                spans.push(Span::styled(
-                    name[position..matched_range.start].to_owned(),
-                    style,
-                ));
+                add_styled(name[position..matched_range.start].to_owned(), style)
             }
-            spans.push(Span::styled(
-                name[matched_range.clone()].to_owned(),
-                matched_style,
-            ));
+            add_styled(name[matched_range.clone()].to_owned(), matched_style);
             position = matched_range.end;
         }
 
         if position < name.len() {
-            spans.push(Span::styled(name[position..].to_owned(), style));
+            add_styled(name[position..].to_owned(), style);
         }
-
-        let annotation = mode.annotation(&self.branch).unwrap_or_default();
-        let status = match self.branch.checkout() {
-            Checkout::Available => "",
-            Checkout::CurrentWorktree => " (current)",
-            Checkout::OtherWorktree => " (other worktree)",
-        };
-        spans.push(Span::styled(format!("{status}{annotation}"), style));
+        add_styled(self.branch_annotation(mode), style);
 
         ListItem::new(Line::from(spans))
     }
@@ -268,7 +266,6 @@ fn rank_branch(branch: &Branch) -> u32 {
 
 pub struct AppImpl<M> {
     branches: Vec<Branch>,
-    branch_order: Vec<usize>,
     mode: M,
     selectable_count: NonZeroUsize,
     search: Search,
@@ -283,6 +280,9 @@ impl AppImpl<CleanMode> {
                 .cmp(&rank_branch(right))
                 .then_with(|| left.name().cmp(right.name()))
         });
+        for (original_rank, branch) in branches.iter_mut().enumerate() {
+            branch.original_rank = original_rank;
+        }
         Self::from_branches(branches, CleanMode)
     }
 }
@@ -347,9 +347,10 @@ impl AppImpl<SingleMode> {
         branches.sort_by_key(|branch| !mode.is_selectable(branch));
         let branches = branches
             .into_iter()
-            .map(|branch| {
+            .enumerate()
+            .map(|(original_rank, branch)| {
                 let selectable = mode.is_selectable(&branch);
-                Branch::new(branch, selectable, false)
+                Branch::new(branch, selectable, false, original_rank)
             })
             .collect();
         Self::from_branches(branches, mode)
@@ -358,18 +359,20 @@ impl AppImpl<SingleMode> {
 
 impl<M> AppImpl<M> {
     fn from_branches(branches: Vec<Branch>, mode: M) -> Option<Self> {
-        let selectable_count =
-            NonZeroUsize::new(branches.iter().filter(|branch| branch.selectable).count())?;
-        let branch_order = (0..branches.len()).collect();
+        let selectable_count = NonZeroUsize::new(
+            branches
+                .iter()
+                .take_while(|branch| branch.selectable)
+                .count(),
+        )?;
         let mut app = Self {
             branches,
-            branch_order,
             mode,
             selectable_count,
             search: Search::default(),
             state: ListState::default(),
         };
-        app.select_first_matching_branch();
+        app.select_first_branch();
         Some(app)
     }
 
@@ -379,16 +382,9 @@ impl<M> AppImpl<M> {
             .expect("a list element is always selected")
     }
 
-    fn branch_index(&self) -> usize {
-        self.branch_order[self.position()]
-    }
-
-    fn branch_at_position(&self, position: usize) -> &Branch {
-        &self.branches[self.branch_order[position]]
-    }
-
+    /// Find the first position which refers to a selectable branch
     fn find_position(&self, mut positions: impl Iterator<Item = usize>) -> Option<usize> {
-        positions.find(|&position| self.branch_at_position(position).selectable)
+        positions.find(|&position| self.branches[position].selectable)
     }
 
     fn next(&mut self) {
@@ -396,9 +392,10 @@ impl<M> AppImpl<M> {
             return;
         }
 
+        // find the next selectable branch, in the current order
         let position = self.position();
-        let positions = (1..=self.branch_order.len())
-            .map(|offset| (position + offset) % self.branch_order.len());
+        let positions =
+            (1..=self.branches.len()).map(|offset| (position + offset) % self.branches.len());
         let new_position = self
             .find_position(positions)
             .expect("at least one branch is selectable");
@@ -410,18 +407,31 @@ impl<M> AppImpl<M> {
             return;
         }
 
+        // find the previous selectable branch, in the current order
         let position = self.position();
-        let positions = (1..=self.branch_order.len())
-            .map(|offset| (position + self.branch_order.len() - offset) % self.branch_order.len());
+        let positions = (1..=self.branches.len())
+            .map(|offset| (position + self.branches.len() - offset) % self.branches.len());
         let new_position = self
             .find_position(positions)
             .expect("at least one branch is selectable");
         self.state.select(Some(new_position));
     }
 
+    fn select_first_branch(&mut self) {
+        let position = self
+            .branches
+            .iter()
+            .position(|branch| branch.selectable)
+            .expect("we enforce one branch is selectable");
+
+        // reset scroll position, then select the first item
+        *self.state.offset_mut() = 0;
+        self.state.select(Some(position));
+    }
+
     fn toggle(&mut self) {
-        let branch_index = self.branch_index();
-        self.branches[branch_index].toggle();
+        let position = self.position();
+        self.branches[position].toggle();
     }
 
     fn update_search(&mut self, request: InputRequest) {
@@ -429,40 +439,17 @@ impl<M> AppImpl<M> {
             return;
         }
 
-        let matches = self
-            .branches
-            .iter()
-            .map(|branch| self.search.matches(branch.name()))
-            .collect::<Vec<_>>();
-        self.branch_order = (0..self.branches.len())
-            .filter(|&index| matches[index])
-            .chain((0..self.branches.len()).filter(|&index| !matches[index]))
-            .collect();
-        self.select_first_matching_branch();
-    }
-
-    fn select_first_matching_branch(&mut self) {
-        let first_match = self.branch_order.iter().position(|&branch_index| {
-            let branch = &self.branches[branch_index];
-            branch.selectable && self.search.matches(branch.name())
-        });
-        let first_selectable = || {
-            self.branch_order
-                .iter()
-                .position(|&branch_index| self.branches[branch_index].selectable)
-        };
-        let position = first_match
-            .or_else(first_selectable)
-            .expect("at least one branch is selectable");
-        *self.state.offset_mut() = 0;
-        self.state.select(Some(position));
+        let search = &self.search;
+        self.branches
+            .sort_unstable_by_key(|branch| (!search.matches(branch.name()), branch.original_rank));
+        self.select_first_branch();
     }
 
     fn output(&self) -> Option<M::Output>
     where
         M: Mode,
     {
-        self.mode.output(&self.branches, self.branch_index())
+        self.mode.output(&self.branches, self.position())
     }
 
     fn update(&mut self, action: Action) -> Transition<M::Output>
@@ -491,11 +478,10 @@ impl<M> AppImpl<M> {
         M: Mode,
     {
         let items = self
-            .branch_order
+            .branches
             .iter()
             .enumerate()
-            .map(|(position, &branch_index)| {
-                let branch = &self.branches[branch_index];
+            .map(|(position, branch)| {
                 branch.render(
                     &self.mode,
                     self.position() == position,
@@ -531,15 +517,13 @@ impl<M> AppImpl<M> {
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(frame.area());
-        let (search_area, branches_area, help_area) = if self.search.is_active() {
-            (Some(chunks[0]), chunks[1], chunks[2])
+        let (branches_area, help_area) = if self.search.is_active() {
+            self.search.render(frame, chunks[0]);
+            (chunks[1], chunks[2])
         } else {
-            (None, chunks[0], chunks[1])
+            (chunks[0], chunks[1])
         };
 
-        if let Some(search_area) = search_area {
-            self.search.render(frame, search_area);
-        }
         frame.render_stateful_widget(self.render_branches(), branches_area, &mut self.state);
         frame.render_widget(
             Paragraph::new(self.mode.help())
@@ -613,15 +597,8 @@ mod tests {
         app.branches.iter().map(Branch::name).collect()
     }
 
-    fn visible_branch_names<M>(app: &AppImpl<M>) -> Vec<&str> {
-        app.branch_order
-            .iter()
-            .map(|&index| app.branches[index].name())
-            .collect()
-    }
-
     fn highlighted_branch_name<M>(app: &AppImpl<M>) -> &str {
-        app.branches[app.branch_index()].name()
+        app.branches[app.position()].name()
     }
 
     fn type_query<M>(app: &mut AppImpl<M>, query: &str)
@@ -857,7 +834,7 @@ mod tests {
         type_query(&mut app, "feature");
         assert_eq!(app.state.offset(), 0);
         assert_eq!(
-            visible_branch_names(&app),
+            branch_names(&app),
             [
                 "feature-one",
                 "beta-feature",
@@ -870,7 +847,7 @@ mod tests {
 
         type_query(&mut app, "-t");
         assert_eq!(
-            visible_branch_names(&app),
+            branch_names(&app),
             [
                 "FEATURE-two",
                 "alpha",
@@ -885,7 +862,7 @@ mod tests {
             app.update(Action::Search(InputRequest::DeleteLine)),
             Transition::Continue
         );
-        assert_eq!(visible_branch_names(&app), canonical_order);
+        assert_eq!(branch_names(&app), canonical_order);
         assert_eq!(highlighted_branch_name(&app), "alpha");
     }
 
@@ -903,7 +880,7 @@ mod tests {
 
         type_query(&mut app, "FEATURE");
 
-        assert_eq!(visible_branch_names(&app), ["feature", "develop", "main"]);
+        assert_eq!(branch_names(&app), ["feature", "develop", "main"]);
         assert_eq!(app.position(), 1);
         assert_eq!(highlighted_branch_name(&app), "develop");
     }
@@ -933,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_toggles_the_highlighted_search_result_without_changing_output_order() {
+    fn clean_toggles_the_highlighted_search_result() {
         let mut app = AppImpl::clean(vec![
             selected("alpha"),
             unselected("feature"),
@@ -949,10 +926,9 @@ mod tests {
         else {
             panic!("the clean selection should complete");
         };
-        assert_eq!(
-            branches.iter().map(LocalBranch::name).collect::<Vec<_>>(),
-            ["alpha", "release", "feature"]
-        );
+        let mut branch_names = branches.iter().map(LocalBranch::name).collect::<Vec<_>>();
+        branch_names.sort_unstable();
+        assert_eq!(branch_names, ["alpha", "feature", "release"]);
     }
 
     #[test]

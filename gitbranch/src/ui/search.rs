@@ -27,12 +27,16 @@ impl Search {
 
         if value_changed {
             let search_term = self.input.value();
-            self.matcher = (!search_term.is_empty()).then(|| {
-                RegexBuilder::new(&regex::escape(search_term))
-                    .case_insensitive(true)
-                    .build()
-                    .expect("an escaped search query is always a valid regular expression")
-            });
+            if search_term.is_empty() {
+                self.matcher = None
+            }
+            // if we failed to build (due to too large a search term), keep the old one
+            else if let Ok(new_matcher) = RegexBuilder::new(&regex::escape(search_term))
+                .case_insensitive(true)
+                .build()
+            {
+                self.matcher = Some(new_matcher);
+            }
         }
 
         value_changed
@@ -44,6 +48,7 @@ impl Search {
             .is_some_and(|matcher| matcher.is_match(branch_name))
     }
 
+    /// Return all parts of branch_name that match the search term
     pub(super) fn match_ranges(&self, branch_name: &str) -> Vec<Range<usize>> {
         self.matcher
             .iter()
