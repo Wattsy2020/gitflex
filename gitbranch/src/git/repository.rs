@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::git::Error::DeletedWorktree;
 
+use super::merge_history::{MergeHistory, MergeHistoryStore, MergeRecord};
 use super::rebase_history::{RebaseHistoryStore, RebaseRecord};
 use super::switch_history::{SwitchHistory, SwitchHistoryStore};
 
@@ -180,6 +181,7 @@ impl fmt::Display for InProgressOperation {
 pub struct Repository {
     inner: git2::Repository,
     worktree: PathBuf,
+    merge_history: MergeHistoryStore,
     rebase_history: RebaseHistoryStore,
     switch_history: SwitchHistoryStore,
 }
@@ -194,11 +196,14 @@ impl Repository {
             .workdir()
             .expect("repository should have been validated as non-bare")
             .to_owned();
-        let rebase_history = RebaseHistoryStore::new(repository.commondir());
-        let switch_history = SwitchHistoryStore::new(repository.commondir());
+        let commondir = repository.commondir();
+        let merge_history = MergeHistoryStore::new(commondir);
+        let rebase_history = RebaseHistoryStore::new(commondir);
+        let switch_history = SwitchHistoryStore::new(commondir);
         Repository {
             inner: repository,
             worktree,
+            merge_history,
             rebase_history,
             switch_history,
         }
@@ -385,6 +390,10 @@ impl HeadOperationRepository {
             .map(str::to_owned))
     }
 
+    pub fn merge_history(&self) -> Result<MergeHistory, Error> {
+        Ok(self.repository.merge_history.load()?)
+    }
+
     pub fn switch_history(&self) -> Result<SwitchHistory, Error> {
         Ok(self.repository.switch_history.load()?)
     }
@@ -430,7 +439,15 @@ impl HeadOperationRepository {
         if current_branch == branch.name() {
             return Err(Error::CurrentBranchAsMergeSource);
         }
-        self.run_git_operation(branch, ["merge", "--no-edit"])
+        let outcome = self.run_git_operation(branch, ["merge", "--no-edit"])?;
+
+        // Merge history is only a ranking cache; its failure must not fail the merge.
+        let _ = self
+            .repository
+            .merge_history
+            .record(MergeRecord::new(current_branch, branch.name()));
+
+        Ok(outcome)
     }
 
     fn run_git_operation<'a, 'b>(
@@ -569,7 +586,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Checkout, CleanBranch, ConflictableCommandOutcome, Error, InProgressOperation,
+        Checkout, CleanBranch, ConflictableCommandOutcome, Error, InProgressOperation, LocalBranch,
         RebaseRecord, Repository,
     };
 
@@ -1245,6 +1262,39 @@ mod tests {
     }
 
     #[test]
+    fn linked_worktree_records_merge_history_in_the_common_git_directory() {
+        let (main_directory, worktree_directory, _) = initialise_worktree();
+        let repository = Repository::discover(worktree_directory.path().join("feature"))
+            .expect("linked worktree repository should be discovered");
+        let main = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "main")
+            .expect("main branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
+
+        let outcome = repository
+            .merge_from(&main)
+            .expect("up-to-date merge should succeed");
+
+        assert_eq!(outcome, ConflictableCommandOutcome::Completed);
+        assert_eq!(
+            fs::read_to_string(main_directory.path().join(".git/gitbranch-merges"))
+                .expect("common merge history should be readable"),
+            "feature\tmain\t0\n"
+        );
+        assert!(
+            !main_directory
+                .path()
+                .join(".git/worktrees/feature-worktree/gitbranch-merges")
+                .exists()
+        );
+    }
+
+    #[test]
     fn switches_to_available_branch() {
         let (directory, repository) = repository_with_branches();
         let repository = Repository::new(repository);
@@ -1496,11 +1546,62 @@ mod tests {
                 .expect("merged file should be checked out"),
             "feature\n"
         );
+        assert_eq!(
+            repository
+                .merge_history()
+                .expect("merge history should be readable")
+                .rank("main", "feature"),
+            Some(0)
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join(".git/gitbranch-merges"))
+                .expect("merge history should be readable"),
+            "main\tfeature\t0\n"
+        );
+    }
+
+    #[test]
+    fn merge_succeeds_when_history_is_locked() {
+        let (directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        commit_file(
+            &repository,
+            "refs/heads/feature",
+            initial,
+            "feature.txt",
+            "feature\n",
+        );
+        fs::write(
+            directory.path().join(".git/gitbranch-merges.lock"),
+            "locked\n",
+        )
+        .expect("merge history lock should be created");
+        let repository = Repository::new(repository);
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
+
+        let outcome = repository
+            .merge_from(&feature)
+            .expect("merge should ignore history write failure");
+
+        assert_eq!(outcome, ConflictableCommandOutcome::Completed);
+        assert!(!directory.path().join(".git/gitbranch-merges").exists());
     }
 
     #[test]
     fn refuses_to_merge_current_branch_into_itself() {
-        let (_directory, repository) = repository_with_branches();
+        let (directory, repository) = repository_with_branches();
         let repository = Repository::new(repository);
         let main = repository
             .local_branches()
@@ -1517,6 +1618,22 @@ mod tests {
             .expect_err("current branch should not be merged into itself");
 
         assert!(matches!(error, Error::CurrentBranchAsMergeSource));
+        assert!(!directory.path().join(".git/gitbranch-merges").exists());
+    }
+
+    #[test]
+    fn failed_merge_does_not_record_history() {
+        let (directory, repository) = repository_with_branches();
+        let repository = Repository::new(repository)
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
+        let missing = LocalBranch::new("missing", Checkout::Available);
+
+        repository
+            .merge_from(&missing)
+            .expect_err("missing merge source should fail");
+
+        assert!(!directory.path().join(".git/gitbranch-merges").exists());
     }
 
     #[test]

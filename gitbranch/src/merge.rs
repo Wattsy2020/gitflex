@@ -12,9 +12,11 @@ pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
         .current_branch()?
         .ok_or(git::Error::DetachedHeadForMerge)?;
 
+    // History is only a ranking cache; failing to read it must not block merging.
+    let history = repository.merge_history().unwrap_or_default();
     let branches = repository.local_branches()?;
 
-    match ui::run_merge_app(branches)? {
+    match ui::run_merge_app(branches, &current_branch, history)? {
         Unavailable => println!("No branches available to merge."),
         Cancelled => println!("Cancelled."),
         Selected(branch) => match repository.merge_from(&branch)? {

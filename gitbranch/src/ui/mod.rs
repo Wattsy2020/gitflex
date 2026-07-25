@@ -1,7 +1,7 @@
 use std::io;
 
 use crate::{
-    git::{CleanBranch, LocalBranch, SwitchHistory},
+    git::{CleanBranch, LocalBranch, MergeHistory, SwitchHistory},
     ui::{
         Selection::{Cancelled, Selected, Unavailable},
         app::{App, AppImpl},
@@ -31,8 +31,12 @@ pub fn run_clean_app(branches: Vec<CleanBranch>) -> io::Result<Selection<Vec<Loc
     run_app(AppImpl::clean(branches))
 }
 
-pub fn run_merge_app(branches: Vec<LocalBranch>) -> io::Result<Selection<LocalBranch>> {
-    run_app(AppImpl::merge(branches))
+pub fn run_merge_app(
+    branches: Vec<LocalBranch>,
+    destination: &str,
+    history: MergeHistory,
+) -> io::Result<Selection<LocalBranch>> {
+    run_app(AppImpl::merge(branches, destination, &history))
 }
 
 pub fn run_rebase_app(

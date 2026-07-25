@@ -347,6 +347,11 @@ fn merges_diverged_branch_into_state_validated_by_git_cli() {
             .git_stdout(&["status", "--porcelain"])
             .is_empty()
     );
+    assert_eq!(
+        fs::read_to_string(test_repository.path.join(".git/gitbranch-merges"))
+            .expect("merge history should be readable"),
+        "main\tfeature\t0\n"
+    );
 }
 
 #[test]

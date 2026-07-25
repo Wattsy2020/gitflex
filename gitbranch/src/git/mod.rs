@@ -1,7 +1,10 @@
 mod history;
+mod merge_history;
 mod rebase_history;
 mod repository;
 mod switch_history;
+
+pub use merge_history::MergeHistory;
 pub use repository::{
     Checkout, CleanBranch, ConflictableCommandOutcome, Error, HeadOperationRepository, LocalBranch,
     Repository,

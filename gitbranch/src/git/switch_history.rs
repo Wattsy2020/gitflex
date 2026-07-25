@@ -48,10 +48,9 @@ impl History for SwitchHistory {
                     .filter(|rank| *rank < usize::MAX)
                     .ok_or(InvalidRecord { line_number })?;
 
-                if rankings.insert(branch.to_owned(), rank).is_some() {
-                    Err(InvalidRecord { line_number })
-                } else {
-                    Ok(rankings)
+                match rankings.insert(branch.to_owned(), rank) {
+                    Some(_) => Err(InvalidRecord { line_number }),
+                    None => Ok(rankings),
                 }
             },
         )?;

@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use crate::git::{Checkout, CleanBranch, LocalBranch, SwitchHistory};
+use crate::git::{Checkout, CleanBranch, LocalBranch, MergeHistory, SwitchHistory};
 
 const SELECTED_COLOUR: Color = Color::Red;
 const SELECTABLE_COLOUR: Color = Color::Black;
@@ -276,7 +276,18 @@ impl AppImpl<SingleMode> {
         )
     }
 
-    pub fn merge(branches: Vec<LocalBranch>) -> Option<Self> {
+    pub fn merge(
+        mut branches: Vec<LocalBranch>,
+        destination: &str,
+        history: &MergeHistory,
+    ) -> Option<Self> {
+        branches.sort_by(|left, right| {
+            history
+                .rank(destination, right.name())
+                .cmp(&history.rank(destination, left.name()))
+                .then_with(|| left.name().cmp(right.name()))
+        });
+
         Self::new(
             branches,
             SingleMode {
@@ -434,7 +445,7 @@ impl App for AppImpl<SingleMode> {
 
 #[cfg(test)]
 mod tests {
-    use crate::git::{Checkout, CleanBranch, LocalBranch, SwitchHistory};
+    use crate::git::{Checkout, CleanBranch, LocalBranch, MergeHistory, SwitchHistory};
 
     use super::{Action, AppImpl, Branch, Confirmation, Transition};
 
@@ -556,7 +567,7 @@ mod tests {
             ["develop", "feature", "release", "main"]
         );
 
-        let merge = AppImpl::merge(branches()).unwrap();
+        let merge = AppImpl::merge(branches(), "main", &MergeHistory::default()).unwrap();
         assert_eq!(
             branch_names(&merge),
             ["develop", "feature", "release", "main"]
@@ -582,6 +593,36 @@ mod tests {
         assert_eq!(
             branch_names(&app),
             ["review", "develop", "alpha", "zeta", "main", "feature"]
+        );
+        assert_eq!(app.position(), 0);
+    }
+
+    #[test]
+    fn merge_ranks_sources_for_the_current_destination_then_by_name() {
+        let history = MergeHistory::for_test([
+            ("main", "review"),
+            ("release", "zeta"),
+            ("main", "develop"),
+            ("main", "deleted"),
+            ("main", "feature"),
+        ]);
+        let app = AppImpl::merge(
+            vec![
+                branch("zeta", Checkout::Available),
+                branch("feature", Checkout::OtherWorktree),
+                branch("alpha", Checkout::Available),
+                branch("main", Checkout::CurrentWorktree),
+                branch("develop", Checkout::Available),
+                branch("review", Checkout::Available),
+            ],
+            "main",
+            &history,
+        )
+        .unwrap();
+
+        assert_eq!(
+            branch_names(&app),
+            ["review", "develop", "feature", "alpha", "zeta", "main"]
         );
         assert_eq!(app.position(), 0);
     }
@@ -662,10 +703,14 @@ mod tests {
 
     #[test]
     fn merge_selects_a_branch_checked_out_in_another_worktree() {
-        let mut app = AppImpl::merge(vec![
-            branch("main", Checkout::CurrentWorktree),
-            branch("feature", Checkout::OtherWorktree),
-        ])
+        let mut app = AppImpl::merge(
+            vec![
+                branch("main", Checkout::CurrentWorktree),
+                branch("feature", Checkout::OtherWorktree),
+            ],
+            "main",
+            &MergeHistory::default(),
+        )
         .unwrap();
 
         let Transition::Complete(branch) = app.update(Action::Confirm(Confirmation::Plain)) else {
