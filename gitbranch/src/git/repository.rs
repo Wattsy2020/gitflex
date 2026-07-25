@@ -4,12 +4,15 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
+use git2::Worktree;
 use git2::build::CheckoutBuilder;
 use git2::{
     Branch, BranchType, ErrorCode, ObjectType, Repository as GitRepository, RepositoryState,
     StatusOptions,
 };
 use thiserror::Error;
+
+use crate::git::Error::DeletedWorktree;
 
 use super::rebase_history::{RebaseHistoryStore, RebaseRecord};
 
@@ -323,9 +326,17 @@ impl Repository {
             .iter()
             .map(|name| {
                 let name = name?.ok_or(Error::InvalidWorktreeName)?;
-                let worktree = self.inner.find_worktree(name)?;
-                let repository = GitRepository::open_from_worktree(&worktree)?;
-                checked_out_branch(&repository)
+                // ignore if we failed to open the worktree
+                // we just use worktrees to show additional information to the user,
+                // the tool can proceed if one worktree is in a weird state by not showing that information to the user
+                Ok(self
+                    .find_worktree(name)
+                    .ok()
+                    .map(|worktree| GitRepository::open_from_worktree(&worktree).ok())
+                    .flatten()
+                    .map(|repo| checked_out_branch(&repo).ok())
+                    .flatten()
+                    .flatten())
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
@@ -337,6 +348,19 @@ impl Repository {
             .flatten()
             .chain(checked_out_branch(&main_repository)?)
             .collect())
+    }
+
+    fn find_worktree(&self, name: &str) -> Result<Worktree, Error> {
+        let worktree = self.inner.find_worktree(name)?;
+
+        // automatically prune invalid worktrees whose directories were deleted
+        // git does this so its ok
+        if worktree.is_prunable(None)? {
+            worktree.prune(None)?;
+            return Err(DeletedWorktree);
+        }
+
+        Ok(worktree)
     }
 }
 
@@ -479,6 +503,8 @@ pub enum Error {
     InvalidBranchName,
     #[error("worktree name is not valid UTF-8")]
     InvalidWorktreeName,
+    #[error("deleted worktree")]
+    DeletedWorktree,
     #[error("branch {0} is checked out in a worktree")]
     BranchCheckedOut(String),
     #[error("git branch deletion failed with {status}: {message}")]

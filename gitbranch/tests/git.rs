@@ -562,3 +562,33 @@ fn protects_branch_checked_out_in_git_cli_worktree() {
         "feature"
     );
 }
+
+#[test]
+fn prunes_deleted_git_cli_worktree() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    let worktree_path = test_repository.worktree_path();
+    test_repository.git_success(&[
+        "worktree",
+        "add",
+        worktree_path
+            .to_str()
+            .expect("worktree path should be valid UTF-8"),
+        "feature",
+    ]);
+    let canonical_worktree_path = fs::canonicalize(&worktree_path).unwrap();
+    fs::remove_dir_all(&worktree_path).expect("worktree should be deleted");
+    let repository = test_repository.discover();
+
+    let feature = branch(&repository, "feature");
+
+    assert_eq!(feature.checkout(), Checkout::Available);
+    repository
+        .delete_branch(&feature)
+        .expect("feature branch should be deleted");
+    let branch_output =
+        test_repository.git(&["show-ref", "--verify", "--quiet", "refs/heads/feature"]);
+    assert_eq!(branch_output.status.code(), Some(1));
+    let worktrees = test_repository.git_stdout(&["worktree", "list", "--porcelain"]);
+    assert!(!worktrees.contains(&format!("worktree {}", canonical_worktree_path.display())));
+}
