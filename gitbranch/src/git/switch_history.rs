@@ -1,99 +1,81 @@
-use std::{collections::HashSet, io, path::Path};
+use std::collections::HashMap;
 
-use super::history_file::HistoryFile;
+use super::history::{History, HistoryStore};
 
 const HISTORY_FILE_NAME: &str = "gitbranch-switches";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SwitchHistory {
-    branches: Vec<String>,
+    rankings: HashMap<String, usize>,
 }
 
 impl SwitchHistory {
-    fn parse(contents: &str) -> Result<Self, InvalidRecord> {
-        let mut seen = HashSet::new();
-        let branches = contents
-            .lines()
-            .enumerate()
-            .map(|(index, branch)| {
-                if branch.is_empty() || !seen.insert(branch) {
-                    Err(InvalidRecord {
-                        line_number: index + 1,
-                    })
-                } else {
-                    Ok(branch.to_owned())
-                }
-            })
-            .collect::<Result<_, _>>()?;
-
-        Ok(Self { branches })
-    }
-
     pub fn rank(&self, branch: &str) -> Option<usize> {
-        self.branches
-            .iter()
-            .position(|candidate| candidate == branch)
+        self.rankings.get(branch).copied()
     }
 
     #[cfg(test)]
     pub(crate) fn for_test(branches: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let branches = branches.into_iter().map(Into::into).collect::<Vec<_>>();
         Self {
-            branches: branches.into_iter().map(Into::into).collect(),
+            rankings: branches
+                .into_iter()
+                .rev()
+                .enumerate()
+                .map(|(rank, branch)| (branch, rank))
+                .collect(),
         }
     }
+}
 
-    fn record(&mut self, branch: &str) {
-        self.branches.retain(|candidate| candidate != branch);
-        self.branches.insert(0, branch.to_owned());
+impl History for SwitchHistory {
+    const FILE_NAME: &'static str = HISTORY_FILE_NAME;
+    type Record = String;
+    type ParseError = InvalidRecord;
+
+    fn parse(contents: &str) -> Result<Self, Self::ParseError> {
+        let rankings = contents.lines().enumerate().try_fold(
+            HashMap::new(),
+            |mut rankings, (index, line)| {
+                let line_number = index + 1;
+                let (branch, rank) = line
+                    .split_once('\t')
+                    .filter(|(branch, rank)| !branch.is_empty() && !rank.contains('\t'))
+                    .ok_or(InvalidRecord { line_number })?;
+                let rank = rank
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|rank| *rank < usize::MAX)
+                    .ok_or(InvalidRecord { line_number })?;
+
+                if rankings.insert(branch.to_owned(), rank).is_some() {
+                    Err(InvalidRecord { line_number })
+                } else {
+                    Ok(rankings)
+                }
+            },
+        )?;
+
+        Ok(Self { rankings })
     }
 
-    fn serialize(&self) -> String {
-        self.branches
-            .iter()
-            .map(|branch| format!("{branch}\n"))
+    fn record(mut self, branch: Self::Record) -> String {
+        let next_rank = self.rankings.values().max().map_or(0, |rank| rank + 1);
+        self.rankings.insert(branch, next_rank);
+
+        let mut rankings = self.rankings.into_iter().collect::<Vec<_>>();
+        rankings.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        rankings
+            .into_iter()
+            .map(|(branch, rank)| format!("{branch}\t{rank}\n"))
             .collect()
     }
 }
 
-#[derive(Debug)]
-pub struct SwitchHistoryStore {
-    file: HistoryFile,
-}
-
-impl SwitchHistoryStore {
-    pub fn new(common_directory: &Path) -> Self {
-        Self {
-            file: HistoryFile::new(common_directory, HISTORY_FILE_NAME),
-        }
-    }
-
-    pub fn load(&self) -> io::Result<SwitchHistory> {
-        let Some(contents) = self.file.read()? else {
-            return Ok(SwitchHistory::default());
-        };
-
-        match std::str::from_utf8(&contents)
-            .ok()
-            .and_then(|contents| SwitchHistory::parse(contents).ok())
-        {
-            Some(history) => Ok(history),
-            None => {
-                self.file.remove()?;
-                Ok(SwitchHistory::default())
-            }
-        }
-    }
-
-    pub fn record(&self, branch: &str) -> io::Result<()> {
-        let lock = self.file.lock()?;
-        let mut history = self.load()?;
-        history.record(branch);
-        lock.commit(history.serialize().as_bytes())
-    }
-}
+pub(super) type SwitchHistoryStore = HistoryStore<SwitchHistory>;
 
 #[derive(Debug, Eq, PartialEq)]
-struct InvalidRecord {
+pub(super) struct InvalidRecord {
     line_number: usize,
 }
 
@@ -103,70 +85,64 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{HISTORY_FILE_NAME, InvalidRecord, SwitchHistory, SwitchHistoryStore};
+    use super::{HISTORY_FILE_NAME, History, InvalidRecord, SwitchHistory, SwitchHistoryStore};
 
     #[test]
-    fn parses_and_serializes_history_in_most_recent_order() {
-        let history = SwitchHistory::parse("feature-b\nfeature-a\n").expect("history should parse");
+    fn parses_history_into_branch_rankings() {
+        let history =
+            SwitchHistory::parse("feature-b\t4\nfeature-a\t2\n").expect("history should parse");
 
-        assert_eq!(history.rank("feature-b"), Some(0));
-        assert_eq!(history.rank("feature-a"), Some(1));
+        assert_eq!(history.rank("feature-b"), Some(4));
+        assert_eq!(history.rank("feature-a"), Some(2));
         assert_eq!(history.rank("unknown"), None);
-        assert_eq!(history.serialize(), "feature-b\nfeature-a\n");
     }
 
     #[test]
     fn rejects_empty_and_duplicate_records() {
         assert_eq!(
-            SwitchHistory::parse("feature\n\n").expect_err("empty record should be rejected"),
+            SwitchHistory::parse("\t0\n").expect_err("empty branch should be rejected"),
+            InvalidRecord { line_number: 1 }
+        );
+        assert_eq!(
+            SwitchHistory::parse("feature\t1\nfeature\t2\n")
+                .expect_err("duplicate branch should be rejected"),
             InvalidRecord { line_number: 2 }
         );
         assert_eq!(
-            SwitchHistory::parse("feature\nfeature\n")
-                .expect_err("duplicate record should be rejected"),
-            InvalidRecord { line_number: 2 }
+            SwitchHistory::parse("feature\n").expect_err("missing rank should be rejected"),
+            InvalidRecord { line_number: 1 }
+        );
+        assert_eq!(
+            SwitchHistory::parse("feature\trecent\n")
+                .expect_err("non-numeric rank should be rejected"),
+            InvalidRecord { line_number: 1 }
+        );
+        assert_eq!(
+            SwitchHistory::parse(&format!("feature\t{}\n", usize::MAX))
+                .expect_err("maximum rank should be rejected"),
+            InvalidRecord { line_number: 1 }
         );
     }
 
     #[test]
-    fn malformed_history_is_deleted_and_treated_as_empty() {
-        let directory = TempDir::new().expect("temporary directory should be created");
-        let history_path = directory.path().join(HISTORY_FILE_NAME);
-        fs::write(&history_path, "feature\nfeature\n")
-            .expect("malformed history should be written");
-        let store = SwitchHistoryStore::new(directory.path());
-
+    fn recording_assigns_the_next_rank_and_serializes_by_branch_name() {
+        let history =
+            SwitchHistory::parse("feature-b\t5\nfeature-a\t2\n").expect("history should parse");
         assert_eq!(
-            store.load().expect("malformed history should be ignored"),
-            SwitchHistory::default()
+            history.record("feature-a".to_owned()),
+            "feature-a\t6\nfeature-b\t5\n"
         );
-        assert!(!history_path.exists());
 
-        store
-            .record("feature")
-            .expect("a later switch should recreate history");
+        let history =
+            SwitchHistory::parse("feature-b\t5\nfeature-a\t2\n").expect("history should parse");
         assert_eq!(
-            fs::read_to_string(history_path).expect("recreated history should be readable"),
-            "feature\n"
+            history.record("feature-c".to_owned()),
+            "feature-a\t2\nfeature-b\t5\nfeature-c\t6\n"
         );
     }
 
     #[test]
-    fn non_utf8_history_is_deleted_and_treated_as_empty() {
-        let directory = TempDir::new().expect("temporary directory should be created");
-        let history_path = directory.path().join(HISTORY_FILE_NAME);
-        fs::write(&history_path, [0xff]).expect("non-UTF-8 history should be written");
-        let store = SwitchHistoryStore::new(directory.path());
-
-        assert_eq!(
-            store.load().expect("non-UTF-8 history should be ignored"),
-            SwitchHistory::default()
-        );
-        assert!(!history_path.exists());
-    }
-
-    #[test]
-    fn missing_history_is_empty_and_repeated_branches_move_to_the_front() {
+    fn missing_history_is_empty_and_repeated_branches_receive_the_next_rank() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let store = SwitchHistoryStore::new(directory.path());
 
@@ -176,25 +152,22 @@ mod tests {
         );
 
         store
-            .record("feature")
+            .record("feature".to_owned())
             .expect("first switch should be recorded");
         store
-            .record("review")
+            .record("review".to_owned())
             .expect("second switch should be recorded");
         store
-            .record("feature")
+            .record("feature".to_owned())
             .expect("repeated switch should be recorded");
 
-        assert_eq!(
-            store.load().expect("history should be readable"),
-            SwitchHistory {
-                branches: vec!["feature".to_owned(), "review".to_owned()]
-            }
-        );
+        let history = store.load().expect("history should be readable");
+        assert_eq!(history.rank("feature"), Some(2));
+        assert_eq!(history.rank("review"), Some(1));
         assert_eq!(
             fs::read_to_string(directory.path().join(HISTORY_FILE_NAME))
                 .expect("history file should be readable"),
-            "feature\nreview\n"
+            "feature\t2\nreview\t1\n"
         );
     }
 }

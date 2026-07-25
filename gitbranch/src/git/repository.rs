@@ -377,7 +377,12 @@ impl HeadOperationRepository {
 
     pub fn last_rebase_target(&self) -> Result<Option<String>, Error> {
         let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
-        Ok(self.repository.rebase_history.target_for(&current_branch)?)
+        Ok(self
+            .repository
+            .rebase_history
+            .load()?
+            .target_for(&current_branch)
+            .map(str::to_owned))
     }
 
     pub fn switch_history(&self) -> Result<SwitchHistory, Error> {
@@ -399,7 +404,7 @@ impl HeadOperationRepository {
         self.repository.inner.set_head(reference_name)?;
 
         // Switching succeeded, so a cache write failure should not fail the user's operation.
-        let _ = self.repository.switch_history.record(&branch_name);
+        let _ = self.repository.switch_history.record(branch_name);
         Ok(())
     }
 
@@ -1267,7 +1272,7 @@ mod tests {
         assert_eq!(
             fs::read_to_string(directory.path().join(".git/gitbranch-switches"))
                 .expect("switch history should be readable"),
-            "feature\n"
+            "feature\t0\n"
         );
 
         let main = repository
@@ -1292,7 +1297,7 @@ mod tests {
         assert_eq!(
             fs::read_to_string(directory.path().join(".git/gitbranch-switches"))
                 .expect("updated switch history should be readable"),
-            "feature\nmain\n"
+            "feature\t2\nmain\t1\n"
         );
     }
 
@@ -1357,7 +1362,7 @@ mod tests {
         assert_eq!(
             fs::read_to_string(main_directory.path().join(".git/gitbranch-switches"))
                 .expect("common switch history should be readable"),
-            "review\n"
+            "review\t0\n"
         );
         assert!(
             !main_directory
@@ -1706,9 +1711,9 @@ mod tests {
             repository
                 .repository
                 .rebase_history
-                .target_for("main")
+                .load()
                 .expect("rebase history should be readable")
-                .as_deref(),
+                .target_for("main"),
             Some("feature")
         );
 

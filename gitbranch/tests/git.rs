@@ -297,7 +297,7 @@ fn switches_to_branch_created_by_git_cli() {
     assert_eq!(
         fs::read_to_string(test_repository.path.join(".git/gitbranch-switches"))
             .expect("switch history should be readable"),
-        "feature\n"
+        "feature\t0\n"
     );
 }
 

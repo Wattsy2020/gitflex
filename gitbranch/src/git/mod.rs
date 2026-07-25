@@ -1,4 +1,4 @@
-mod history_file;
+mod history;
 mod rebase_history;
 mod repository;
 mod switch_history;

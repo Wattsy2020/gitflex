@@ -244,9 +244,8 @@ impl AppImpl<SingleMode> {
     pub fn switch(mut branches: Vec<LocalBranch>, history: &SwitchHistory) -> Option<Self> {
         branches.sort_by(|left, right| {
             history
-                .rank(left.name())
-                .unwrap_or(usize::MAX)
-                .cmp(&history.rank(right.name()).unwrap_or(usize::MAX))
+                .rank(right.name())
+                .cmp(&history.rank(left.name()))
                 .then_with(|| left.name().cmp(right.name()))
         });
 

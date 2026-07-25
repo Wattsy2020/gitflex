@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, io, path::Path};
+use std::collections::BTreeMap;
 
-use super::history_file::HistoryFile;
+use super::history::{History, HistoryStore};
 
 const HISTORY_FILE_NAME: &str = "gitbranch-rebases";
 
@@ -19,53 +19,23 @@ impl RebaseRecord {
     }
 }
 
-#[derive(Debug)]
-pub struct RebaseHistoryStore {
-    file: HistoryFile,
-}
-
-impl RebaseHistoryStore {
-    pub fn new(common_directory: &Path) -> Self {
-        Self {
-            file: HistoryFile::new(common_directory, HISTORY_FILE_NAME),
-        }
-    }
-
-    pub fn target_for(&self, source: &str) -> io::Result<Option<String>> {
-        Ok(self.load()?.target_for(source).map(str::to_owned))
-    }
-
-    pub fn record(&self, record: RebaseRecord) -> io::Result<()> {
-        let lock = self.file.lock()?;
-        let mut history = self.load()?;
-        history.record(record);
-        lock.commit(history.serialize().as_bytes())
-    }
-
-    fn load(&self) -> io::Result<RebaseHistory> {
-        match self.file.read()? {
-            Some(contents) => match std::str::from_utf8(&contents)
-                .ok()
-                .and_then(|contents| RebaseHistory::parse(contents).ok())
-            {
-                Some(history) => Ok(history),
-                None => {
-                    self.file.remove()?;
-                    Ok(RebaseHistory::default())
-                }
-            },
-            None => Ok(RebaseHistory::default()),
-        }
-    }
-}
-
 #[derive(Debug, Default, Eq, PartialEq)]
-struct RebaseHistory {
+pub(super) struct RebaseHistory {
     targets: BTreeMap<String, String>,
 }
 
 impl RebaseHistory {
-    fn parse(contents: &str) -> Result<Self, InvalidRecord> {
+    pub(super) fn target_for(&self, source: &str) -> Option<&str> {
+        self.targets.get(source).map(String::as_str)
+    }
+}
+
+impl History for RebaseHistory {
+    const FILE_NAME: &'static str = HISTORY_FILE_NAME;
+    type Record = RebaseRecord;
+    type ParseError = InvalidRecord;
+
+    fn parse(contents: &str) -> Result<Self, Self::ParseError> {
         let targets = contents
             .lines()
             .enumerate()
@@ -83,24 +53,19 @@ impl RebaseHistory {
         Ok(Self { targets })
     }
 
-    fn target_for(&self, source: &str) -> Option<&str> {
-        self.targets.get(source).map(String::as_str)
-    }
-
-    fn record(&mut self, record: RebaseRecord) {
+    fn record(mut self, record: Self::Record) -> String {
         self.targets.insert(record.source, record.target);
-    }
-
-    fn serialize(&self) -> String {
         self.targets
-            .iter()
+            .into_iter()
             .map(|(source, target)| format!("{source}\t{target}\n"))
             .collect()
     }
 }
 
+pub(super) type RebaseHistoryStore = HistoryStore<RebaseHistory>;
+
 #[derive(Debug, Eq, PartialEq)]
-struct InvalidRecord {
+pub(super) struct InvalidRecord {
     line_number: usize,
 }
 
@@ -110,16 +75,19 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{InvalidRecord, RebaseHistory, RebaseHistoryStore, RebaseRecord};
+    use super::{History, InvalidRecord, RebaseHistory, RebaseHistoryStore, RebaseRecord};
 
     #[test]
-    fn parses_and_serializes_history_in_source_branch_order() {
+    fn parses_and_records_history_in_source_branch_order() {
         let history = RebaseHistory::parse("feature-b\tdevelop\nfeature-a\tmain\n")
             .expect("history should parse");
 
         assert_eq!(history.target_for("feature-a"), Some("main"));
         assert_eq!(history.target_for("feature-b"), Some("develop"));
-        assert_eq!(history.serialize(), "feature-a\tmain\nfeature-b\tdevelop\n");
+        assert_eq!(
+            history.record(RebaseRecord::new("feature-a", "release")),
+            "feature-a\trelease\nfeature-b\tdevelop\n"
+        );
     }
 
     #[test]
@@ -131,56 +99,13 @@ mod tests {
     }
 
     #[test]
-    fn malformed_history_is_deleted_and_treated_as_empty() {
-        let directory = TempDir::new().expect("temporary directory should be created");
-        let history_path = directory.path().join("gitbranch-rebases");
-        fs::write(&history_path, "a format from another version\n")
-            .expect("malformed history should be written");
-        let store = RebaseHistoryStore::new(directory.path());
-
-        assert_eq!(
-            store
-                .target_for("feature")
-                .expect("malformed history should be ignored"),
-            None
-        );
-        assert!(!history_path.exists());
-
-        store
-            .record(RebaseRecord::new("feature", "main"))
-            .expect("a later rebase target should recreate history");
-        assert_eq!(
-            fs::read_to_string(history_path).expect("recreated history should be readable"),
-            "feature\tmain\n"
-        );
-    }
-
-    #[test]
-    fn non_utf8_history_is_deleted_and_treated_as_empty() {
-        let directory = TempDir::new().expect("temporary directory should be created");
-        let history_path = directory.path().join("gitbranch-rebases");
-        fs::write(&history_path, [0xff]).expect("non-UTF-8 history should be written");
-        let store = RebaseHistoryStore::new(directory.path());
-
-        assert_eq!(
-            store
-                .target_for("feature")
-                .expect("non-UTF-8 history should be ignored"),
-            None
-        );
-        assert!(!history_path.exists());
-    }
-
-    #[test]
     fn missing_history_is_empty_and_records_are_replaced_per_source() {
         let directory = TempDir::new().expect("temporary directory should be created");
         let store = RebaseHistoryStore::new(directory.path());
 
         assert_eq!(
-            store
-                .target_for("feature")
-                .expect("missing history should be readable"),
-            None
+            store.load().expect("missing history should be readable"),
+            RebaseHistory::default()
         );
 
         store
@@ -195,16 +120,16 @@ mod tests {
 
         assert_eq!(
             store
-                .target_for("feature")
+                .load()
                 .expect("feature history should be readable")
-                .as_deref(),
+                .target_for("feature"),
             Some("release")
         );
         assert_eq!(
             store
-                .target_for("other")
+                .load()
                 .expect("other history should be readable")
-                .as_deref(),
+                .target_for("other"),
             Some("develop")
         );
         assert_eq!(
