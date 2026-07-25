@@ -8,7 +8,7 @@ use crate::{
 };
 
 pub fn run(repository: &Repository) -> Result<(), Error> {
-    let branches = repository.local_branches()?;
+    let branches = repository.clean_branches()?;
     match ui::run_clean_app(branches)? {
         Unavailable => println!("No deletable branches found."),
         Cancelled => println!("Cancelled."),

@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use crate::git::{Checkout, LocalBranch};
+use crate::git::{Checkout, CleanBranch, LocalBranch};
 
 const SELECTED_COLOUR: Color = Color::Red;
 const SELECTABLE_COLOUR: Color = Color::Black;
@@ -57,8 +57,6 @@ pub struct SingleMode {
 trait Mode {
     type Output;
 
-    fn is_selectable(&self, branch: &LocalBranch) -> bool;
-    fn initially_selected(&self, branch: &LocalBranch) -> bool;
     fn marker(&self, branch: &Branch) -> &'static str;
     fn annotation(&self, branch: &LocalBranch) -> Option<&'static str>;
     fn is_selected(&self, branch: &Branch) -> bool;
@@ -71,16 +69,8 @@ trait Mode {
 impl Mode for CleanMode {
     type Output = Vec<LocalBranch>;
 
-    fn is_selectable(&self, branch: &LocalBranch) -> bool {
-        branch.is_deletable()
-    }
-
-    fn initially_selected(&self, branch: &LocalBranch) -> bool {
-        branch.is_deletable()
-    }
-
     fn marker(&self, branch: &Branch) -> &'static str {
-        if !branch.branch.is_deletable() {
+        if !branch.selectable {
             "[-] "
         } else if branch.selected {
             "[x] "
@@ -98,7 +88,7 @@ impl Mode for CleanMode {
     }
 
     fn toggle(&self, branch: &mut Branch) {
-        if self.is_selectable(&branch.branch) {
+        if branch.selectable {
             branch.selected = !branch.selected;
         }
     }
@@ -123,9 +113,7 @@ impl Mode for CleanMode {
     }
 }
 
-impl Mode for SingleMode {
-    type Output = LocalBranch;
-
+impl SingleMode {
     fn is_selectable(&self, branch: &LocalBranch) -> bool {
         match &self.operation {
             SingleOperation::Switch => branch.is_switchable(),
@@ -133,10 +121,10 @@ impl Mode for SingleMode {
             SingleOperation::Merge => branch.is_merge_source(),
         }
     }
+}
 
-    fn initially_selected(&self, _branch: &LocalBranch) -> bool {
-        false
-    }
+impl Mode for SingleMode {
+    type Output = LocalBranch;
 
     fn marker(&self, _branch: &Branch) -> &'static str {
         ""
@@ -164,7 +152,7 @@ impl Mode for SingleMode {
     fn output(&self, branches: &[Branch], position: usize) -> Option<Self::Output> {
         branches
             .get(position)
-            .filter(|branch| self.is_selectable(&branch.branch))
+            .filter(|branch| branch.selectable)
             .map(|branch| branch.branch.clone())
     }
 
@@ -181,14 +169,16 @@ impl Mode for SingleMode {
 
 struct Branch {
     branch: LocalBranch,
+    selectable: bool,
     selected: bool,
 }
 
 impl Branch {
-    fn new<M: Mode>(branch: LocalBranch, mode: &M) -> Self {
+    fn new(branch: LocalBranch, selectable: bool, selected: bool) -> Self {
         Self {
-            selected: mode.initially_selected(&branch),
             branch,
+            selectable,
+            selected,
         }
     }
 
@@ -210,7 +200,7 @@ impl Branch {
             SELECTED_COLOUR
         } else if highlighted {
             HIGHLIGHTED_COLOUR
-        } else if mode.is_selectable(&self.branch) {
+        } else if self.selectable {
             SELECTABLE_COLOUR
         } else {
             UNSELECTABLE_COLOUR
@@ -233,8 +223,26 @@ pub struct AppImpl<M> {
 }
 
 impl AppImpl<CleanMode> {
-    pub fn clean(branches: Vec<LocalBranch>) -> Option<Self> {
-        Self::new(branches, CleanMode)
+    pub fn clean(mut branches: Vec<CleanBranch>) -> Option<Self> {
+        branches.sort_unstable_by(|left, right| {
+            let rank = |branch: &CleanBranch| match (branch.is_selectable(), branch.is_selected()) {
+                (true, true) => 0,
+                (true, false) => 1,
+                (false, _) => 2,
+            };
+            rank(left)
+                .cmp(&rank(right))
+                .then_with(|| left.name().cmp(right.name()))
+        });
+        let branches = branches
+            .into_iter()
+            .map(|branch| {
+                let selectable = branch.is_selectable();
+                let selected = branch.is_selected();
+                Branch::new(branch.into_branch(), selectable, selected)
+            })
+            .collect();
+        Self::from_branches(branches, CleanMode)
     }
 }
 
@@ -278,21 +286,13 @@ impl AppImpl<SingleMode> {
 }
 
 impl<M> AppImpl<M> {
-    fn new(mut branches: Vec<LocalBranch>, mode: M) -> Option<Self>
-    where
-        M: Mode,
-    {
-        branches.sort_by_key(|branch| !mode.is_selectable(branch));
+    fn from_branches(branches: Vec<Branch>, mode: M) -> Option<Self> {
         let selectable_count = NonZeroUsize::new(
             branches
                 .iter()
-                .take_while(|branch| mode.is_selectable(branch))
+                .take_while(|branch| branch.selectable)
                 .count(),
         )?;
-        let branches = branches
-            .into_iter()
-            .map(|branch| Branch::new(branch, &mode))
-            .collect();
         let mut app = Self {
             branches,
             mode,
@@ -396,6 +396,20 @@ impl<M> AppImpl<M> {
     }
 }
 
+impl AppImpl<SingleMode> {
+    fn new(mut branches: Vec<LocalBranch>, mode: SingleMode) -> Option<Self> {
+        branches.sort_by_key(|branch| !mode.is_selectable(branch));
+        let branches = branches
+            .into_iter()
+            .map(|branch| {
+                let selectable = mode.is_selectable(&branch);
+                Branch::new(branch, selectable, false)
+            })
+            .collect();
+        Self::from_branches(branches, mode)
+    }
+}
+
 pub trait App {
     type Output;
     fn update(&mut self, action: Action) -> Transition<Self::Output>;
@@ -424,12 +438,24 @@ impl App for AppImpl<SingleMode> {
 
 #[cfg(test)]
 mod tests {
-    use crate::git::{Checkout, LocalBranch};
+    use crate::git::{Checkout, CleanBranch, LocalBranch};
 
     use super::{Action, AppImpl, Confirmation, Transition};
 
     fn branch(name: &str, checkout: Checkout) -> LocalBranch {
         LocalBranch::for_test(name, checkout)
+    }
+
+    fn selected(name: &str) -> CleanBranch {
+        CleanBranch::Selected(branch(name, Checkout::Available))
+    }
+
+    fn unselected(name: &str) -> CleanBranch {
+        CleanBranch::Unselected(branch(name, Checkout::Available))
+    }
+
+    fn unselectable(name: &str, checkout: Checkout) -> CleanBranch {
+        CleanBranch::Unselectable(branch(name, checkout))
     }
 
     fn branch_names<M>(app: &AppImpl<M>) -> Vec<&str> {
@@ -440,11 +466,11 @@ mod tests {
     }
 
     #[test]
-    fn clean_starts_with_every_deletable_branch_selected() {
+    fn clean_confirms_only_initially_selected_branches() {
         let mut app = AppImpl::clean(vec![
-            branch("feature-a", Checkout::Available),
-            branch("feature-b", Checkout::Available),
-            branch("main", Checkout::CurrentWorktree),
+            selected("feature-a"),
+            unselected("feature-b"),
+            unselectable("main", Checkout::CurrentWorktree),
         ])
         .unwrap();
 
@@ -454,17 +480,13 @@ mod tests {
         };
         assert_eq!(
             branches.iter().map(LocalBranch::name).collect::<Vec<_>>(),
-            ["feature-a", "feature-b"]
+            ["feature-a"]
         );
     }
 
     #[test]
     fn clean_requires_modified_confirmation_and_toggle_changes_selection() {
-        let mut app = AppImpl::clean(vec![
-            branch("feature-a", Checkout::Available),
-            branch("feature-b", Checkout::Available),
-        ])
-        .unwrap();
+        let mut app = AppImpl::clean(vec![selected("feature-a"), selected("feature-b")]).unwrap();
 
         assert_eq!(
             app.update(Action::Confirm(Confirmation::Plain)),
@@ -512,7 +534,13 @@ mod tests {
             ]
         };
 
-        let clean = AppImpl::clean(branches()).unwrap();
+        let clean = AppImpl::clean(vec![
+            unselectable("main", Checkout::CurrentWorktree),
+            unselected("release"),
+            unselectable("feature", Checkout::OtherWorktree),
+            selected("develop"),
+        ])
+        .unwrap();
         assert_eq!(
             branch_names(&clean),
             ["develop", "release", "feature", "main"]
@@ -535,6 +563,56 @@ mod tests {
             branch_names(&merge),
             ["develop", "feature", "release", "main"]
         );
+    }
+
+    #[test]
+    fn clean_sorts_each_group_alphabetically_and_never_reorders_after_toggles() {
+        let mut app = AppImpl::clean(vec![
+            unselectable("main", Checkout::CurrentWorktree),
+            unselected("gamma"),
+            selected("zeta"),
+            unselected("beta"),
+            selected("alpha"),
+        ])
+        .unwrap();
+        let initial_order = ["alpha", "zeta", "beta", "gamma", "main"];
+        assert_eq!(branch_names(&app), initial_order);
+
+        assert_eq!(app.update(Action::Toggle), Transition::Continue);
+        assert_eq!(branch_names(&app), initial_order);
+        assert_eq!(app.update(Action::Next), Transition::Continue);
+        assert_eq!(app.update(Action::Toggle), Transition::Continue);
+        assert_eq!(branch_names(&app), initial_order);
+        assert_eq!(app.update(Action::Next), Transition::Continue);
+        assert_eq!(app.update(Action::Toggle), Transition::Continue);
+        assert_eq!(branch_names(&app), initial_order);
+
+        let Transition::Complete(branches) = app.update(Action::Confirm(Confirmation::Modified))
+        else {
+            panic!("a modified confirmation should complete clean selection");
+        };
+        assert_eq!(
+            branches.iter().map(LocalBranch::name).collect::<Vec<_>>(),
+            ["beta"]
+        );
+    }
+
+    #[test]
+    fn clean_navigation_includes_unselected_but_skips_unselectable_branches() {
+        let mut app = AppImpl::clean(vec![
+            unselectable("main", Checkout::CurrentWorktree),
+            unselected("feature-b"),
+            selected("feature-a"),
+        ])
+        .unwrap();
+
+        assert_eq!(app.position(), 0);
+        assert_eq!(app.update(Action::Next), Transition::Continue);
+        assert_eq!(app.position(), 1);
+        assert_eq!(app.update(Action::Next), Transition::Continue);
+        assert_eq!(app.position(), 0);
+        assert_eq!(app.update(Action::Previous), Transition::Continue);
+        assert_eq!(app.position(), 1);
     }
 
     #[test]

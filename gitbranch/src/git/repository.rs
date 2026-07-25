@@ -26,6 +26,43 @@ pub struct LocalBranch {
     checkout: Checkout,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CleanBranch {
+    Selected(LocalBranch),
+    Unselected(LocalBranch),
+    Unselectable(LocalBranch),
+}
+
+impl CleanBranch {
+    pub fn name(&self) -> &str {
+        self.branch().name()
+    }
+
+    pub fn is_selectable(&self) -> bool {
+        !matches!(self, Self::Unselectable(_))
+    }
+
+    pub fn is_selected(&self) -> bool {
+        matches!(self, Self::Selected(_))
+    }
+
+    pub fn into_branch(self) -> LocalBranch {
+        match self {
+            Self::Selected(branch) | Self::Unselected(branch) | Self::Unselectable(branch) => {
+                branch
+            }
+        }
+    }
+
+    fn branch(&self) -> &LocalBranch {
+        match self {
+            Self::Selected(branch) | Self::Unselected(branch) | Self::Unselectable(branch) => {
+                branch
+            }
+        }
+    }
+}
+
 impl LocalBranch {
     fn new(name: impl Into<String>, checkout: Checkout) -> Self {
         Self {
@@ -181,6 +218,49 @@ impl Repository {
         Ok(branches)
     }
 
+    pub fn clean_branches(&self) -> Result<Vec<CleanBranch>, Error> {
+        let branches = self.local_branches()?;
+        let base_name = ["main", "master"]
+            .into_iter()
+            .find(|candidate| branches.iter().any(|branch| branch.name() == *candidate));
+        let base_tip = base_name
+            .map(|name| self.inner.refname_to_id(&format!("refs/heads/{name}")))
+            .transpose()?;
+        let user_email = configured_user_email(&self.inner)?;
+
+        branches
+            .into_iter()
+            .map(|branch| {
+                if !branch.is_deletable() || base_name == Some(branch.name()) {
+                    return Ok(CleanBranch::Unselectable(branch));
+                }
+
+                let tip = self
+                    .find_branch(&branch)?
+                    .into_reference()
+                    .peel_to_commit()?;
+                let merged = match base_tip {
+                    Some(base_tip) => {
+                        tip.id() == base_tip
+                            || self.inner.graph_descendant_of(base_tip, tip.id())?
+                    }
+                    None => false,
+                };
+                let authored_by_other = user_email.as_deref().is_some_and(|user_email| {
+                    tip.author()
+                        .email()
+                        .is_ok_and(|author_email| author_email != user_email)
+                });
+
+                Ok(if merged || authored_by_other {
+                    CleanBranch::Selected(branch)
+                } else {
+                    CleanBranch::Unselected(branch)
+                })
+            })
+            .collect()
+    }
+
     pub fn current_branch(&self) -> Result<Option<String>, Error> {
         checked_out_branch(&self.inner)
     }
@@ -247,7 +327,7 @@ impl HeadOperationRepository {
         self.repository.current_branch()
     }
 
-    pub(crate) fn last_rebase_target(&self) -> Result<Option<String>, Error> {
+    pub fn last_rebase_target(&self) -> Result<Option<String>, Error> {
         let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
         Ok(self.repository.rebase_history.target_for(&current_branch)?)
     }
@@ -340,6 +420,14 @@ fn checked_out_branch(repository: &GitRepository) -> Result<Option<String>, Erro
     }
 }
 
+fn configured_user_email(repository: &GitRepository) -> Result<Option<String>, Error> {
+    match repository.config()?.get_string("user.email") {
+        Ok(email) => Ok((!email.is_empty()).then_some(email)),
+        Err(error) if error.code() == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn has_conflicts(worktree: &Path) -> Result<bool, Error> {
     Ok(GitRepository::open(worktree)?.index()?.has_conflicts())
 }
@@ -418,7 +506,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Checkout, ConflictableCommandOutcome, Error, InProgressOperation, RebaseRecord, Repository,
+        Checkout, CleanBranch, ConflictableCommandOutcome, Error, InProgressOperation,
+        RebaseRecord, Repository,
     };
 
     fn repository_with_branches() -> (TempDir, GitRepository) {
@@ -493,6 +582,18 @@ mod tests {
         path: &str,
         contents: &str,
     ) -> Oid {
+        let signature = repository.signature().expect("signature should exist");
+        commit_file_as(repository, reference, parent_id, path, contents, &signature)
+    }
+
+    fn commit_file_as(
+        repository: &GitRepository,
+        reference: &str,
+        parent_id: Oid,
+        path: &str,
+        contents: &str,
+        author: &Signature<'_>,
+    ) -> Oid {
         let parent = repository
             .find_commit(parent_id)
             .expect("parent commit should exist");
@@ -507,13 +608,13 @@ mod tests {
             .expect("file should be added to tree");
         let tree_id = tree.write().expect("tree should be written");
         let tree = repository.find_tree(tree_id).expect("tree should exist");
-        let signature = repository.signature().expect("signature should exist");
+        let committer = repository.signature().expect("signature should exist");
 
         repository
             .commit(
                 Some(reference),
-                &signature,
-                &signature,
+                author,
+                &committer,
                 &format!("Update {path}"),
                 &tree,
                 &[&parent],
@@ -696,6 +797,212 @@ mod tests {
                 ("main", Checkout::CurrentWorktree)
             ]
         );
+    }
+
+    #[test]
+    fn clean_classifies_merged_foreign_owned_and_unmerged_branches() {
+        let (_directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        let initial_commit = repository
+            .find_commit(initial)
+            .expect("initial commit should exist");
+        repository
+            .branch("merged", &initial_commit, false)
+            .expect("merged branch should be created");
+        repository
+            .branch("foreign", &initial_commit, false)
+            .expect("foreign branch should be created");
+        drop(initial_commit);
+
+        commit_file(
+            &repository,
+            "refs/heads/feature",
+            initial,
+            "feature.txt",
+            "feature\n",
+        );
+        let foreign_author = Signature::now("Reviewer", "reviewer@example.com")
+            .expect("foreign signature should be valid");
+        commit_file_as(
+            &repository,
+            "refs/heads/foreign",
+            initial,
+            "foreign.txt",
+            "foreign\n",
+            &foreign_author,
+        );
+
+        let branches = Repository::new(repository)
+            .clean_branches()
+            .expect("clean branches should be classified");
+
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "feature"),
+            Some(CleanBranch::Unselected(_))
+        ));
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "foreign"),
+            Some(CleanBranch::Selected(_))
+        ));
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "merged"),
+            Some(CleanBranch::Selected(_))
+        ));
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "main"),
+            Some(CleanBranch::Unselectable(_))
+        ));
+    }
+
+    #[test]
+    fn clean_protects_branches_checked_out_in_any_worktree() {
+        let (_main_directory, _worktree_directory, repository) = initialise_worktree();
+        let branches = repository
+            .clean_branches()
+            .expect("clean branches should be classified");
+
+        assert!(
+            branches
+                .iter()
+                .all(|branch| matches!(branch, CleanBranch::Unselectable(_)))
+        );
+    }
+
+    #[test]
+    fn clean_prefers_main_over_master_and_uses_master_as_a_fallback() {
+        let (_directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        let initial_commit = repository
+            .find_commit(initial)
+            .expect("initial commit should exist");
+        repository
+            .branch("master", &initial_commit, false)
+            .expect("master branch should be created");
+        drop(initial_commit);
+        commit_file(
+            &repository,
+            "refs/heads/master",
+            initial,
+            "master.txt",
+            "master\n",
+        );
+        repository
+            .set_head_detached(initial)
+            .expect("HEAD should detach");
+        let branches = Repository::new(repository)
+            .clean_branches()
+            .expect("clean branches should be classified");
+
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "main"),
+            Some(CleanBranch::Unselectable(_))
+        ));
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "master"),
+            Some(CleanBranch::Unselected(_))
+        ));
+
+        let (_directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        repository
+            .find_branch("main", BranchType::Local)
+            .expect("main branch should exist")
+            .rename("master", false)
+            .expect("main should be renamed to master");
+        repository
+            .set_head_detached(initial)
+            .expect("HEAD should detach");
+        let branches = Repository::new(repository)
+            .clean_branches()
+            .expect("clean branches should be classified");
+
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "feature"),
+            Some(CleanBranch::Selected(_))
+        ));
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "master"),
+            Some(CleanBranch::Unselectable(_))
+        ));
+    }
+
+    #[test]
+    fn clean_uses_available_rules_when_base_or_user_email_is_missing() {
+        let (_directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        repository
+            .find_branch("main", BranchType::Local)
+            .expect("main branch should exist")
+            .rename("trunk", false)
+            .expect("main should be renamed to trunk");
+        repository
+            .set_head_detached(initial)
+            .expect("HEAD should detach");
+        let branches = Repository::new(repository)
+            .clean_branches()
+            .expect("clean branches should be classified");
+
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "feature"),
+            Some(CleanBranch::Unselected(_))
+        ));
+
+        let (_directory, repository) = repository_with_branches();
+        let initial = repository
+            .head()
+            .expect("HEAD should exist")
+            .target()
+            .expect("HEAD should have a target");
+        let initial_commit = repository
+            .find_commit(initial)
+            .expect("initial commit should exist");
+        repository
+            .branch("foreign", &initial_commit, false)
+            .expect("foreign branch should be created");
+        drop(initial_commit);
+        let foreign_author = Signature::now("Reviewer", "reviewer@example.com")
+            .expect("foreign signature should be valid");
+        commit_file_as(
+            &repository,
+            "refs/heads/foreign",
+            initial,
+            "foreign.txt",
+            "foreign\n",
+            &foreign_author,
+        );
+        repository
+            .config()
+            .expect("config should open")
+            .set_str("user.email", "")
+            .expect("user email should be cleared");
+        let branches = Repository::new(repository)
+            .clean_branches()
+            .expect("clean branches should be classified");
+
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "feature"),
+            Some(CleanBranch::Selected(_))
+        ));
+        assert!(matches!(
+            branches.iter().find(|branch| branch.name() == "foreign"),
+            Some(CleanBranch::Unselected(_))
+        ));
     }
 
     #[test]

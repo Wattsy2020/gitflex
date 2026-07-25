@@ -1,7 +1,7 @@
 use std::io;
 
 use crate::{
-    git::LocalBranch,
+    git::{CleanBranch, LocalBranch},
     ui::{
         Selection::{Cancelled, Selected, Unavailable},
         app::{App, AppImpl},
@@ -27,7 +27,7 @@ fn run_app<A: App>(app: Option<A>) -> io::Result<Selection<A::Output>> {
     }
 }
 
-pub fn run_clean_app(branches: Vec<LocalBranch>) -> io::Result<Selection<Vec<LocalBranch>>> {
+pub fn run_clean_app(branches: Vec<CleanBranch>) -> io::Result<Selection<Vec<LocalBranch>>> {
     run_app(AppImpl::clean(branches))
 }
 
