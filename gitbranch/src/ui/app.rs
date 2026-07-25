@@ -8,6 +8,12 @@ use ratatui::{
 
 use crate::git::{Checkout, LocalBranch};
 
+const SELECTED_COLOUR: Color = Color::Red;
+const SELECTABLE_COLOUR: Color = Color::Black;
+const UNSELECTABLE_COLOUR: Color = Color::Gray;
+const HIGHLIGHTED_COLOUR: Color = Color::White;
+const BACKGROUND_COLOUR: Color = Color::Black;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Confirmation {
     Plain,
@@ -197,24 +203,22 @@ impl Branch {
         format!("{marker}{name}{status}{annotation}")
     }
 
-    fn color<M: Mode>(&self, mode: &M, highlighted: bool) -> Color {
-        if !mode.is_selectable(&self.branch) {
-            if highlighted {
-                Color::Gray
-            } else {
-                Color::DarkGray
-            }
-        } else if mode.is_selected(self) {
-            Color::Red
+    fn colour<M: Mode>(&self, mode: &M, highlighted: bool) -> Color {
+        if mode.is_selected(self) {
+            SELECTED_COLOUR
+        } else if highlighted {
+            HIGHLIGHTED_COLOUR
+        } else if mode.is_selectable(&self.branch) {
+            SELECTABLE_COLOUR
         } else {
-            Color::Gray
+            UNSELECTABLE_COLOUR
         }
     }
 
     fn render<M: Mode>(&self, mode: &M, highlighted: bool) -> ListItem<'static> {
         ListItem::new(Line::from(Span::styled(
             self.branch_text(mode),
-            Style::default().fg(self.color(mode, highlighted)),
+            Style::default().fg(self.colour(mode, highlighted)),
         )))
     }
 }
@@ -374,7 +378,7 @@ impl<M> AppImpl<M> {
             .highlight_style(
                 Style::default()
                     .add_modifier(Modifier::BOLD)
-                    .bg(Color::DarkGray),
+                    .bg(BACKGROUND_COLOUR),
             )
             .highlight_symbol("> ")
     }
