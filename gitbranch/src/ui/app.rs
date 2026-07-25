@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use crate::git::{Checkout, CleanBranch, LocalBranch};
+use crate::git::{Checkout, CleanBranch, LocalBranch, SwitchHistory};
 
 const SELECTED_COLOUR: Color = Color::Red;
 const SELECTABLE_COLOUR: Color = Color::Black;
@@ -241,7 +241,15 @@ impl AppImpl<CleanMode> {
 }
 
 impl AppImpl<SingleMode> {
-    pub fn switch(branches: Vec<LocalBranch>) -> Option<Self> {
+    pub fn switch(mut branches: Vec<LocalBranch>, history: &SwitchHistory) -> Option<Self> {
+        branches.sort_by(|left, right| {
+            history
+                .rank(left.name())
+                .unwrap_or(usize::MAX)
+                .cmp(&history.rank(right.name()).unwrap_or(usize::MAX))
+                .then_with(|| left.name().cmp(right.name()))
+        });
+
         Self::new(
             branches,
             SingleMode {
@@ -427,7 +435,7 @@ impl App for AppImpl<SingleMode> {
 
 #[cfg(test)]
 mod tests {
-    use crate::git::{Checkout, CleanBranch, LocalBranch};
+    use crate::git::{Checkout, CleanBranch, LocalBranch, SwitchHistory};
 
     use super::{Action, AppImpl, Branch, Confirmation, Transition};
 
@@ -537,7 +545,7 @@ mod tests {
             ["develop", "release", "feature", "main"]
         );
 
-        let switch = AppImpl::switch(branches()).unwrap();
+        let switch = AppImpl::switch(branches(), &SwitchHistory::default()).unwrap();
         assert_eq!(
             branch_names(&switch),
             ["develop", "release", "feature", "main"]
@@ -554,6 +562,29 @@ mod tests {
             branch_names(&merge),
             ["develop", "feature", "release", "main"]
         );
+    }
+
+    #[test]
+    fn switch_ranks_each_checkout_group_by_history_then_name() {
+        let history = SwitchHistory::for_test(["review", "main", "develop", "deleted", "feature"]);
+        let app = AppImpl::switch(
+            vec![
+                branch("zeta", Checkout::Available),
+                branch("feature", Checkout::OtherWorktree),
+                branch("alpha", Checkout::Available),
+                branch("main", Checkout::CurrentWorktree),
+                branch("develop", Checkout::Available),
+                branch("review", Checkout::Available),
+            ],
+            &history,
+        )
+        .unwrap();
+
+        assert_eq!(
+            branch_names(&app),
+            ["review", "develop", "alpha", "zeta", "main", "feature"]
+        );
+        assert_eq!(app.position(), 0);
     }
 
     #[test]
@@ -608,11 +639,14 @@ mod tests {
 
     #[test]
     fn navigation_wraps_without_highlighting_unselectable_branches() {
-        let mut app = AppImpl::switch(vec![
-            branch("develop", Checkout::Available),
-            branch("feature", Checkout::Available),
-            branch("main", Checkout::CurrentWorktree),
-        ])
+        let mut app = AppImpl::switch(
+            vec![
+                branch("develop", Checkout::Available),
+                branch("feature", Checkout::Available),
+                branch("main", Checkout::CurrentWorktree),
+            ],
+            &SwitchHistory::default(),
+        )
         .unwrap();
 
         assert_eq!(app.position(), 0);
@@ -643,7 +677,11 @@ mod tests {
 
     #[test]
     fn cancellation_exits_without_a_selection() {
-        let mut app = AppImpl::switch(vec![branch("feature", Checkout::Available)]).unwrap();
+        let mut app = AppImpl::switch(
+            vec![branch("feature", Checkout::Available)],
+            &SwitchHistory::default(),
+        )
+        .unwrap();
 
         assert_eq!(app.update(Action::Cancel), Transition::Cancel);
     }

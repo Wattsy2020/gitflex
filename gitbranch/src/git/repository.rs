@@ -15,6 +15,7 @@ use thiserror::Error;
 use crate::git::Error::DeletedWorktree;
 
 use super::rebase_history::{RebaseHistoryStore, RebaseRecord};
+use super::switch_history::{SwitchHistory, SwitchHistoryStore};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Checkout {
@@ -180,6 +181,7 @@ pub struct Repository {
     inner: git2::Repository,
     worktree: PathBuf,
     rebase_history: RebaseHistoryStore,
+    switch_history: SwitchHistoryStore,
 }
 
 pub struct HeadOperationRepository {
@@ -193,10 +195,12 @@ impl Repository {
             .expect("repository should have been validated as non-bare")
             .to_owned();
         let rebase_history = RebaseHistoryStore::new(repository.commondir());
+        let switch_history = SwitchHistoryStore::new(repository.commondir());
         Repository {
             inner: repository,
             worktree,
             rebase_history,
+            switch_history,
         }
     }
 
@@ -332,10 +336,8 @@ impl Repository {
                 Ok(self
                     .find_worktree(name)
                     .ok()
-                    .map(|worktree| GitRepository::open_from_worktree(&worktree).ok())
-                    .flatten()
-                    .map(|repo| checked_out_branch(&repo).ok())
-                    .flatten()
+                    .and_then(|worktree| GitRepository::open_from_worktree(&worktree).ok())
+                    .and_then(|repository| checked_out_branch(&repository).ok())
                     .flatten())
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -378,7 +380,12 @@ impl HeadOperationRepository {
         Ok(self.repository.rebase_history.target_for(&current_branch)?)
     }
 
+    pub fn switch_history(&self) -> Result<SwitchHistory, Error> {
+        Ok(self.repository.switch_history.load()?)
+    }
+
     pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
+        let branch_name = branch.name().to_owned();
         let branch = self.repository.get_non_checkedout_branch(branch)?;
         let reference = branch.get();
         let reference_name = reference.name()?;
@@ -390,6 +397,9 @@ impl HeadOperationRepository {
             .inner
             .checkout_tree(&target, Some(&mut checkout))?;
         self.repository.inner.set_head(reference_name)?;
+
+        // Switching succeeded, so a cache write failure should not fail the user's operation.
+        let _ = self.repository.switch_history.record(&branch_name);
         Ok(())
     }
 
@@ -1231,7 +1241,7 @@ mod tests {
 
     #[test]
     fn switches_to_available_branch() {
-        let (_directory, repository) = repository_with_branches();
+        let (directory, repository) = repository_with_branches();
         let repository = Repository::new(repository);
         let feature = repository
             .local_branches()
@@ -1254,11 +1264,41 @@ mod tests {
                 .as_deref(),
             Some("feature")
         );
+        assert_eq!(
+            fs::read_to_string(directory.path().join(".git/gitbranch-switches"))
+                .expect("switch history should be readable"),
+            "feature\n"
+        );
+
+        let main = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "main")
+            .expect("main branch should exist");
+        repository
+            .switch_to(&main)
+            .expect("main branch should be switched");
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+        repository
+            .switch_to(&feature)
+            .expect("feature branch should be switched again");
+
+        assert_eq!(
+            fs::read_to_string(directory.path().join(".git/gitbranch-switches"))
+                .expect("updated switch history should be readable"),
+            "feature\nmain\n"
+        );
     }
 
     #[test]
     fn refuses_to_switch_to_branch_in_other_worktree() {
-        let (_dir1, _dir2, repository) = initialise_worktree();
+        let (main_directory, _worktree_directory, repository) = initialise_worktree();
         let feature = repository
             .local_branches()
             .expect("branches should be listed")
@@ -1274,6 +1314,90 @@ mod tests {
             .expect_err("checked-out branch should not be switched to");
 
         assert!(matches!(error, Error::BranchCheckedOut(name) if name == "feature"));
+        assert!(
+            !main_directory
+                .path()
+                .join(".git/gitbranch-switches")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn linked_worktree_records_switch_history_in_the_common_git_directory() {
+        let (main_directory, repository) = repository_with_branches();
+        let head = repository
+            .head()
+            .expect("HEAD should exist")
+            .peel_to_commit()
+            .expect("HEAD should point to a commit");
+        repository
+            .branch("review", &head, false)
+            .expect("review branch should be created");
+        drop(head);
+        let worktree_directory = TempDir::new().expect("temporary directory should be created");
+        add_feature_worktree(&repository, &worktree_directory);
+        drop(repository);
+
+        let repository = Repository::discover(worktree_directory.path().join("feature"))
+            .expect("linked worktree repository should be discovered");
+        let review = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "review")
+            .expect("review branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
+
+        repository
+            .switch_to(&review)
+            .expect("review branch should be switched");
+
+        assert_eq!(
+            fs::read_to_string(main_directory.path().join(".git/gitbranch-switches"))
+                .expect("common switch history should be readable"),
+            "review\n"
+        );
+        assert!(
+            !main_directory
+                .path()
+                .join(".git/worktrees/feature-worktree/gitbranch-switches")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn switch_succeeds_when_history_is_locked() {
+        let (directory, repository) = repository_with_branches();
+        fs::write(
+            directory.path().join(".git/gitbranch-switches.lock"),
+            "locked\n",
+        )
+        .expect("switch history lock should be created");
+        let repository = Repository::new(repository);
+        let feature = repository
+            .local_branches()
+            .expect("branches should be listed")
+            .into_iter()
+            .find(|branch| branch.name() == "feature")
+            .expect("feature branch should exist");
+        let repository = repository
+            .into_head_operation()
+            .expect("repository should allow HEAD operations");
+
+        repository
+            .switch_to(&feature)
+            .expect("switch should ignore history write failure");
+
+        assert_eq!(
+            repository
+                .current_branch()
+                .expect("current branch should be read")
+                .as_deref(),
+            Some("feature")
+        );
+        assert!(!directory.path().join(".git/gitbranch-switches").exists());
     }
 
     #[test]

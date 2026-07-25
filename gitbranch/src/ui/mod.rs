@@ -1,7 +1,7 @@
 use std::io;
 
 use crate::{
-    git::{CleanBranch, LocalBranch},
+    git::{CleanBranch, LocalBranch, SwitchHistory},
     ui::{
         Selection::{Cancelled, Selected, Unavailable},
         app::{App, AppImpl},
@@ -42,6 +42,9 @@ pub fn run_rebase_app(
     run_app(AppImpl::rebase(branches, last_target))
 }
 
-pub fn run_switch_app(branches: Vec<LocalBranch>) -> io::Result<Selection<LocalBranch>> {
-    run_app(AppImpl::switch(branches))
+pub fn run_switch_app(
+    branches: Vec<LocalBranch>,
+    history: SwitchHistory,
+) -> io::Result<Selection<LocalBranch>> {
+    run_app(AppImpl::switch(branches, &history))
 }

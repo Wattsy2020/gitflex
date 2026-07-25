@@ -294,6 +294,11 @@ fn switches_to_branch_created_by_git_cli() {
             .git_stdout(&["status", "--porcelain"])
             .is_empty()
     );
+    assert_eq!(
+        fs::read_to_string(test_repository.path.join(".git/gitbranch-switches"))
+            .expect("switch history should be readable"),
+        "feature\n"
+    );
 }
 
 #[test]

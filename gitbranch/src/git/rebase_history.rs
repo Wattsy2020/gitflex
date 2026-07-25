@@ -1,12 +1,8 @@
-use std::{
-    collections::BTreeMap,
-    fs::{self, File, OpenOptions},
-    io::{self, Write},
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, io, path::Path};
+
+use super::history_file::HistoryFile;
 
 const HISTORY_FILE_NAME: &str = "gitbranch-rebases";
-const LOCK_FILE_NAME: &str = "gitbranch-rebases.lock";
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct RebaseRecord {
@@ -25,15 +21,13 @@ impl RebaseRecord {
 
 #[derive(Debug)]
 pub struct RebaseHistoryStore {
-    history_path: PathBuf,
-    lock_path: PathBuf,
+    file: HistoryFile,
 }
 
 impl RebaseHistoryStore {
     pub fn new(common_directory: &Path) -> Self {
         Self {
-            history_path: common_directory.join(HISTORY_FILE_NAME),
-            lock_path: common_directory.join(LOCK_FILE_NAME),
+            file: HistoryFile::new(common_directory, HISTORY_FILE_NAME),
         }
     }
 
@@ -42,27 +36,25 @@ impl RebaseHistoryStore {
     }
 
     pub fn record(&self, record: RebaseRecord) -> io::Result<()> {
-        let mut lock = LockFile::create(&self.lock_path)?;
+        let lock = self.file.lock()?;
         let mut history = self.load()?;
         history.record(record);
-        lock.write_all(history.serialize().as_bytes())?;
-        lock.commit(&self.history_path)
+        lock.commit(history.serialize().as_bytes())
     }
 
     fn load(&self) -> io::Result<RebaseHistory> {
-        match fs::read(&self.history_path) {
-            Ok(contents) => match std::str::from_utf8(&contents)
+        match self.file.read()? {
+            Some(contents) => match std::str::from_utf8(&contents)
                 .ok()
                 .and_then(|contents| RebaseHistory::parse(contents).ok())
             {
                 Some(history) => Ok(history),
                 None => {
-                    remove_if_present(&self.history_path)?;
+                    self.file.remove()?;
                     Ok(RebaseHistory::default())
                 }
             },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(RebaseHistory::default()),
-            Err(error) => Err(error),
+            None => Ok(RebaseHistory::default()),
         }
     }
 }
@@ -104,56 +96,6 @@ impl RebaseHistory {
             .iter()
             .map(|(source, target)| format!("{source}\t{target}\n"))
             .collect()
-    }
-}
-
-/// A file based Lock that supports atomically writing to a path by writing to the lock file and then switching to the path
-struct LockFile {
-    path: PathBuf,
-    file: Option<File>,
-}
-
-impl LockFile {
-    /// Attempt to create the lock, failing if it exists
-    fn create(path: &Path) -> io::Result<Self> {
-        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-        Ok(Self {
-            path: path.to_owned(),
-            file: Some(file),
-        })
-    }
-
-    /// Write to the lock file
-    fn write_all(&mut self, contents: &[u8]) -> io::Result<()> {
-        self.file
-            .as_mut()
-            .expect("an uncommitted lock always has an open file")
-            .write_all(contents)?;
-        Ok(())
-    }
-
-    /// Commit contents of the lock file, writing them into the destination
-    fn commit(mut self, destination: &Path) -> io::Result<()> {
-        self.file
-            .take()
-            .expect("an uncommitted lock always has an open file")
-            .sync_all()?;
-        fs::rename(&self.path, destination)?;
-        Ok(())
-    }
-}
-
-impl Drop for LockFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn remove_if_present(path: &Path) -> Result<(), io::Error> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
     }
 }
 
