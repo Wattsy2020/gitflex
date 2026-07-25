@@ -9,6 +9,7 @@ use crate::{
 };
 
 mod app;
+mod search;
 mod tui;
 
 pub enum Selection<T> {

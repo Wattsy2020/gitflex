@@ -7,13 +7,18 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
+use tui_input::InputRequest;
 
-use crate::git::{Checkout, CleanBranch, LocalBranch, MergeHistory, SwitchHistory};
+use crate::{
+    git::{Checkout, CleanBranch, LocalBranch, MergeHistory, SwitchHistory},
+    ui::search::Search,
+};
 
 const SELECTED_COLOUR: Color = Color::Red;
 const SELECTABLE_COLOUR: Color = Color::Black;
 const UNSELECTABLE_COLOUR: Color = Color::Gray;
 const HIGHLIGHTED_COLOUR: Color = Color::White;
+const MATCHED_COLOUR: Color = Color::Yellow;
 const BACKGROUND_COLOUR: Color = Color::Black;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,6 +33,7 @@ pub enum Action {
     Next,
     Previous,
     Toggle,
+    Search(InputRequest),
     Confirm(Confirmation),
     Cancel,
 }
@@ -97,7 +103,7 @@ impl Mode for CleanMode {
     }
 
     fn help(&self) -> &'static str {
-        "↑/↓ navigate   space toggle   cmd/ctrl+enter delete selected   q/esc quit"
+        "type search   ↑/↓ navigate   space toggle   cmd/ctrl+enter delete selected   esc quit"
     }
 }
 
@@ -140,11 +146,13 @@ impl Mode for SingleMode {
 
     fn help(&self) -> &'static str {
         match &self.operation {
-            SingleOperation::Switch => "↑/↓ navigate   enter switch to branch   q/esc quit",
-            SingleOperation::Rebase { .. } => {
-                "↑/↓ navigate   enter rebase onto branch   q/esc quit"
+            SingleOperation::Switch => {
+                "type search   ↑/↓ navigate   enter switch to branch   esc quit"
             }
-            SingleOperation::Merge => "↑/↓ navigate   enter merge branch   q/esc quit",
+            SingleOperation::Rebase { .. } => {
+                "type search   ↑/↓ navigate   enter rebase onto branch   esc quit"
+            }
+            SingleOperation::Merge => "type search   ↑/↓ navigate   enter merge branch   esc quit",
         }
     }
 }
@@ -180,6 +188,7 @@ impl Branch {
         }
     }
 
+    #[cfg(test)]
     fn branch_text<M: Mode>(&self, mode: &M) -> String {
         let marker = mode.marker(self);
         let name = self.name();
@@ -205,11 +214,47 @@ impl Branch {
         }
     }
 
-    pub fn render<M: Mode>(&self, mode: &M, highlighted: bool) -> ListItem<'static> {
-        ListItem::new(Line::from(Span::styled(
-            self.branch_text(mode),
-            Style::default().fg(self.colour(highlighted)),
-        )))
+    pub fn render<M: Mode>(
+        &self,
+        mode: &M,
+        highlighted: bool,
+        matched_ranges: &[std::ops::Range<usize>],
+    ) -> ListItem<'static> {
+        let style = Style::default().fg(self.colour(highlighted));
+        let matched_style = style
+            .fg(MATCHED_COLOUR)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let name = self.name();
+        let mut spans = vec![Span::styled(mode.marker(self), style)];
+        let mut position = 0;
+
+        for matched_range in matched_ranges {
+            if position < matched_range.start {
+                spans.push(Span::styled(
+                    name[position..matched_range.start].to_owned(),
+                    style,
+                ));
+            }
+            spans.push(Span::styled(
+                name[matched_range.clone()].to_owned(),
+                matched_style,
+            ));
+            position = matched_range.end;
+        }
+
+        if position < name.len() {
+            spans.push(Span::styled(name[position..].to_owned(), style));
+        }
+
+        let annotation = mode.annotation(&self.branch).unwrap_or_default();
+        let status = match self.branch.checkout() {
+            Checkout::Available => "",
+            Checkout::CurrentWorktree => " (current)",
+            Checkout::OtherWorktree => " (other worktree)",
+        };
+        spans.push(Span::styled(format!("{status}{annotation}"), style));
+
+        ListItem::new(Line::from(spans))
     }
 }
 
@@ -223,8 +268,10 @@ fn rank_branch(branch: &Branch) -> u32 {
 
 pub struct AppImpl<M> {
     branches: Vec<Branch>,
+    branch_order: Vec<usize>,
     mode: M,
     selectable_count: NonZeroUsize,
+    search: Search,
     state: ListState,
 }
 
@@ -311,19 +358,18 @@ impl AppImpl<SingleMode> {
 
 impl<M> AppImpl<M> {
     fn from_branches(branches: Vec<Branch>, mode: M) -> Option<Self> {
-        let selectable_count = NonZeroUsize::new(
-            branches
-                .iter()
-                .take_while(|branch| branch.selectable)
-                .count(),
-        )?;
+        let selectable_count =
+            NonZeroUsize::new(branches.iter().filter(|branch| branch.selectable).count())?;
+        let branch_order = (0..branches.len()).collect();
         let mut app = Self {
             branches,
+            branch_order,
             mode,
             selectable_count,
+            search: Search::default(),
             state: ListState::default(),
         };
-        app.state.select(Some(0));
+        app.select_first_matching_branch();
         Some(app)
     }
 
@@ -333,29 +379,90 @@ impl<M> AppImpl<M> {
             .expect("a list element is always selected")
     }
 
+    fn branch_index(&self) -> usize {
+        self.branch_order[self.position()]
+    }
+
+    fn branch_at_position(&self, position: usize) -> &Branch {
+        &self.branches[self.branch_order[position]]
+    }
+
+    fn find_position(&self, mut positions: impl Iterator<Item = usize>) -> Option<usize> {
+        positions.find(|&position| self.branch_at_position(position).selectable)
+    }
+
     fn next(&mut self) {
-        let new_pos = (self.position() + 1) % self.selectable_count.get();
-        self.state.select(Some(new_pos));
+        if self.selectable_count.get() == 1 {
+            return;
+        }
+
+        let position = self.position();
+        let positions = (1..=self.branch_order.len())
+            .map(|offset| (position + offset) % self.branch_order.len());
+        let new_position = self
+            .find_position(positions)
+            .expect("at least one branch is selectable");
+        self.state.select(Some(new_position));
     }
 
     fn previous(&mut self) {
-        let new_pos = self
-            .position()
-            .checked_sub(1)
-            .unwrap_or(self.selectable_count.get() - 1);
-        self.state.select(Some(new_pos));
+        if self.selectable_count.get() == 1 {
+            return;
+        }
+
+        let position = self.position();
+        let positions = (1..=self.branch_order.len())
+            .map(|offset| (position + self.branch_order.len() - offset) % self.branch_order.len());
+        let new_position = self
+            .find_position(positions)
+            .expect("at least one branch is selectable");
+        self.state.select(Some(new_position));
     }
 
     fn toggle(&mut self) {
-        let position = self.position();
-        self.branches[position].toggle();
+        let branch_index = self.branch_index();
+        self.branches[branch_index].toggle();
+    }
+
+    fn update_search(&mut self, request: InputRequest) {
+        if !self.search.edit(request) {
+            return;
+        }
+
+        let matches = self
+            .branches
+            .iter()
+            .map(|branch| self.search.matches(branch.name()))
+            .collect::<Vec<_>>();
+        self.branch_order = (0..self.branches.len())
+            .filter(|&index| matches[index])
+            .chain((0..self.branches.len()).filter(|&index| !matches[index]))
+            .collect();
+        self.select_first_matching_branch();
+    }
+
+    fn select_first_matching_branch(&mut self) {
+        let first_match = self.branch_order.iter().position(|&branch_index| {
+            let branch = &self.branches[branch_index];
+            branch.selectable && self.search.matches(branch.name())
+        });
+        let first_selectable = || {
+            self.branch_order
+                .iter()
+                .position(|&branch_index| self.branches[branch_index].selectable)
+        };
+        let position = first_match
+            .or_else(first_selectable)
+            .expect("at least one branch is selectable");
+        *self.state.offset_mut() = 0;
+        self.state.select(Some(position));
     }
 
     fn output(&self) -> Option<M::Output>
     where
         M: Mode,
     {
-        self.mode.output(&self.branches, self.position())
+        self.mode.output(&self.branches, self.branch_index())
     }
 
     fn update(&mut self, action: Action) -> Transition<M::Output>
@@ -366,6 +473,7 @@ impl<M> AppImpl<M> {
             Action::Next => self.next(),
             Action::Previous => self.previous(),
             Action::Toggle => self.toggle(),
+            Action::Search(request) => self.update_search(request),
             Action::Confirm(confirmation) if self.mode.confirms(confirmation) => {
                 return self
                     .output()
@@ -383,10 +491,17 @@ impl<M> AppImpl<M> {
         M: Mode,
     {
         let items = self
-            .branches
+            .branch_order
             .iter()
             .enumerate()
-            .map(|(index, branch)| branch.render(&self.mode, self.position() == index))
+            .map(|(position, &branch_index)| {
+                let branch = &self.branches[branch_index];
+                branch.render(
+                    &self.mode,
+                    self.position() == position,
+                    &self.search.match_ranges(branch.name()),
+                )
+            })
             .collect::<Vec<_>>();
 
         List::new(items)
@@ -403,16 +518,33 @@ impl<M> AppImpl<M> {
     where
         M: Mode,
     {
+        let constraints = if self.search.is_active() {
+            vec![
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(3),
+            ]
+        } else {
+            vec![Constraint::Min(1), Constraint::Length(3)]
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(3)])
+            .constraints(constraints)
             .split(frame.area());
+        let (search_area, branches_area, help_area) = if self.search.is_active() {
+            (Some(chunks[0]), chunks[1], chunks[2])
+        } else {
+            (None, chunks[0], chunks[1])
+        };
 
-        frame.render_stateful_widget(self.render_branches(), chunks[0], &mut self.state);
+        if let Some(search_area) = search_area {
+            self.search.render(frame, search_area);
+        }
+        frame.render_stateful_widget(self.render_branches(), branches_area, &mut self.state);
         frame.render_widget(
             Paragraph::new(self.mode.help())
                 .block(Block::default().borders(Borders::ALL).title("Help")),
-            chunks[1],
+            help_area,
         );
     }
 }
@@ -445,6 +577,14 @@ impl App for AppImpl<SingleMode> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        buffer::Buffer,
+        style::{Color, Modifier},
+    };
+    use tui_input::InputRequest;
+
     use crate::git::{Checkout, CleanBranch, LocalBranch, MergeHistory, SwitchHistory};
 
     use super::{Action, AppImpl, Branch, Confirmation, Transition};
@@ -471,6 +611,38 @@ mod tests {
 
     fn branch_names<M>(app: &AppImpl<M>) -> Vec<&str> {
         app.branches.iter().map(Branch::name).collect()
+    }
+
+    fn visible_branch_names<M>(app: &AppImpl<M>) -> Vec<&str> {
+        app.branch_order
+            .iter()
+            .map(|&index| app.branches[index].name())
+            .collect()
+    }
+
+    fn highlighted_branch_name<M>(app: &AppImpl<M>) -> &str {
+        app.branches[app.branch_index()].name()
+    }
+
+    fn type_query<M>(app: &mut AppImpl<M>, query: &str)
+    where
+        M: super::Mode,
+    {
+        query.chars().for_each(|character| {
+            assert!(matches!(
+                app.update(Action::Search(InputRequest::InsertChar(character))),
+                Transition::Continue
+            ));
+        });
+    }
+
+    fn buffer_row(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .fold(String::new(), |mut row, symbol| {
+                row.push_str(symbol);
+                row
+            })
     }
 
     #[test]
@@ -657,6 +829,166 @@ mod tests {
             branches.iter().map(LocalBranch::name).collect::<Vec<_>>(),
             ["beta"]
         );
+    }
+
+    #[test]
+    fn search_stably_promotes_case_insensitive_matches_from_the_canonical_order() {
+        let mut app = AppImpl::rebase(
+            vec![
+                branch("alpha", Checkout::Available),
+                branch("feature-one", Checkout::Available),
+                branch("beta-feature", Checkout::Available),
+                branch("FEATURE-two", Checkout::Available),
+                branch("main", Checkout::CurrentWorktree),
+            ],
+            None,
+        )
+        .unwrap();
+        let canonical_order = [
+            "alpha",
+            "feature-one",
+            "beta-feature",
+            "FEATURE-two",
+            "main",
+        ];
+        assert_eq!(branch_names(&app), canonical_order);
+
+        *app.state.offset_mut() = 3;
+        type_query(&mut app, "feature");
+        assert_eq!(app.state.offset(), 0);
+        assert_eq!(
+            visible_branch_names(&app),
+            [
+                "feature-one",
+                "beta-feature",
+                "FEATURE-two",
+                "alpha",
+                "main"
+            ]
+        );
+        assert_eq!(highlighted_branch_name(&app), "feature-one");
+
+        type_query(&mut app, "-t");
+        assert_eq!(
+            visible_branch_names(&app),
+            [
+                "FEATURE-two",
+                "alpha",
+                "feature-one",
+                "beta-feature",
+                "main"
+            ]
+        );
+        assert_eq!(highlighted_branch_name(&app), "FEATURE-two");
+
+        assert_eq!(
+            app.update(Action::Search(InputRequest::DeleteLine)),
+            Transition::Continue
+        );
+        assert_eq!(visible_branch_names(&app), canonical_order);
+        assert_eq!(highlighted_branch_name(&app), "alpha");
+    }
+
+    #[test]
+    fn search_falls_back_to_the_first_selectable_branch_when_matches_are_unselectable() {
+        let mut app = AppImpl::rebase(
+            vec![
+                branch("develop", Checkout::Available),
+                branch("feature", Checkout::CurrentWorktree),
+                branch("main", Checkout::Available),
+            ],
+            None,
+        )
+        .unwrap();
+
+        type_query(&mut app, "FEATURE");
+
+        assert_eq!(visible_branch_names(&app), ["feature", "develop", "main"]);
+        assert_eq!(app.position(), 1);
+        assert_eq!(highlighted_branch_name(&app), "develop");
+    }
+
+    #[test]
+    fn navigation_and_confirmation_follow_the_search_order() {
+        let mut app = AppImpl::rebase(
+            vec![
+                branch("alpha", Checkout::Available),
+                branch("release-one", Checkout::Available),
+                branch("beta-release", Checkout::Available),
+                branch("main", Checkout::CurrentWorktree),
+            ],
+            None,
+        )
+        .unwrap();
+        type_query(&mut app, "release");
+
+        assert_eq!(highlighted_branch_name(&app), "release-one");
+        assert_eq!(app.update(Action::Next), Transition::Continue);
+        assert_eq!(highlighted_branch_name(&app), "beta-release");
+
+        let Transition::Complete(branch) = app.update(Action::Confirm(Confirmation::Plain)) else {
+            panic!("the highlighted search result should be selectable");
+        };
+        assert_eq!(branch.name(), "beta-release");
+    }
+
+    #[test]
+    fn clean_toggles_the_highlighted_search_result_without_changing_output_order() {
+        let mut app = AppImpl::clean(vec![
+            selected("alpha"),
+            unselected("feature"),
+            selected("release"),
+        ])
+        .unwrap();
+        type_query(&mut app, "feature");
+
+        assert_eq!(highlighted_branch_name(&app), "feature");
+        assert_eq!(app.update(Action::Toggle), Transition::Continue);
+
+        let Transition::Complete(branches) = app.update(Action::Confirm(Confirmation::Modified))
+        else {
+            panic!("the clean selection should complete");
+        };
+        assert_eq!(
+            branches.iter().map(LocalBranch::name).collect::<Vec<_>>(),
+            ["alpha", "release", "feature"]
+        );
+    }
+
+    #[test]
+    fn rendering_shows_the_search_bar_cursor_and_all_matched_substrings() {
+        let mut app = AppImpl::rebase(
+            vec![
+                branch("feature/FEATURE", Checkout::Available),
+                branch("main", Checkout::CurrentWorktree),
+            ],
+            None,
+        )
+        .unwrap();
+        type_query(&mut app, "feat");
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let backend = terminal.backend();
+        let buffer = backend.buffer();
+
+        assert!(buffer_row(buffer, 0).contains("Search"));
+        assert!(buffer_row(buffer, 1).contains("feat"));
+        assert!(buffer_row(buffer, 3).contains("Branches"));
+        assert!(buffer_row(buffer, 4).contains("feature/FEATURE"));
+        assert_eq!(
+            backend.cursor_position(),
+            ratatui::layout::Position::new(5, 1)
+        );
+        assert!(backend.cursor_visible());
+
+        for x in (3..7).chain(11..15) {
+            let cell = &buffer[(x, 4)];
+            assert_eq!(cell.fg, Color::Yellow);
+            assert!(cell.modifier.contains(Modifier::BOLD));
+            assert!(cell.modifier.contains(Modifier::UNDERLINED));
+        }
+        assert_ne!(buffer[(7, 4)].fg, Color::Yellow);
     }
 
     #[test]
