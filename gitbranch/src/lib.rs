@@ -7,7 +7,7 @@ mod rebase;
 mod switch;
 mod ui;
 
-use git::{HeadOperationRepository, Repository};
+use git::{CleanRebaseRepository, HeadOperationRepository, Repository};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -25,7 +25,7 @@ pub fn run_switch(repository: &HeadOperationRepository) -> Result<(), Error> {
     switch::run(repository)
 }
 
-pub fn run_rebase(repository: &HeadOperationRepository) -> Result<(), Error> {
+pub fn run_rebase(repository: &CleanRebaseRepository) -> Result<(), Error> {
     rebase::run(repository)
 }
 

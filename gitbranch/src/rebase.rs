@@ -1,13 +1,13 @@
 use crate::{
     Error,
-    git::{self, ConflictableCommandOutcome, HeadOperationRepository},
+    git::{self, CleanRebaseRepository, ConflictableCommandOutcome},
     ui::{
         self,
         Selection::{Cancelled, Selected, Unavailable},
     },
 };
 
-pub fn run(repository: &HeadOperationRepository) -> Result<(), Error> {
+pub fn run(repository: &CleanRebaseRepository) -> Result<(), Error> {
     let current_branch = repository
         .current_branch()?
         .ok_or(git::Error::DetachedHead)?;

@@ -190,6 +190,10 @@ pub struct HeadOperationRepository {
     repository: Repository,
 }
 
+pub struct CleanRebaseRepository {
+    repository: Repository,
+}
+
 impl Repository {
     fn new(repository: GitRepository) -> Repository {
         let worktree = repository
@@ -220,9 +224,6 @@ impl Repository {
     pub fn into_head_operation(self) -> Result<HeadOperationRepository, Error> {
         if let Some(operation) = InProgressOperation::from_repository_state(self.inner.state()) {
             return Err(Error::OperationInProgress(operation));
-        }
-        if has_tracked_changes(&self.inner)? {
-            return Err(Error::TrackedChanges);
         }
         Ok(HeadOperationRepository { repository: self })
     }
@@ -369,6 +370,35 @@ impl Repository {
 
         Ok(worktree)
     }
+
+    fn run_git_operation<'a, 'b>(
+        &'a self,
+        branch: &LocalBranch,
+        arguments: impl IntoIterator<Item = &'b str>,
+    ) -> Result<ConflictableCommandOutcome, Error> {
+        let other_branch = self.find_branch(branch)?.get().name()?.to_string();
+        let mut args: Vec<&str> = arguments.into_iter().collect();
+        args.push(&other_branch);
+        let command = args[0].to_string();
+        let had_conflicts = has_conflicts(&self.worktree)?;
+
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.worktree)
+            .output()?;
+
+        if output.status.success() {
+            Ok(ConflictableCommandOutcome::Completed)
+        } else if !had_conflicts && has_conflicts(&self.worktree)? {
+            Ok(ConflictableCommandOutcome::Conflicted)
+        } else {
+            Err(Error::CommandFailed {
+                command,
+                status: output.status,
+                message: command_message(&output.stdout, &output.stderr),
+            })
+        }
+    }
 }
 
 impl HeadOperationRepository {
@@ -380,22 +410,21 @@ impl HeadOperationRepository {
         self.repository.current_branch()
     }
 
-    pub fn last_rebase_target(&self) -> Result<Option<String>, Error> {
-        let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
-        Ok(self
-            .repository
-            .rebase_history
-            .load()?
-            .target_for(&current_branch)
-            .map(str::to_owned))
-    }
-
     pub fn merge_history(&self) -> Result<MergeHistory, Error> {
         Ok(self.repository.merge_history.load()?)
     }
 
     pub fn switch_history(&self) -> Result<SwitchHistory, Error> {
         Ok(self.repository.switch_history.load()?)
+    }
+
+    pub fn into_clean_rebase(self) -> Result<CleanRebaseRepository, Error> {
+        if has_tracked_changes(&self.repository.inner)? {
+            return Err(Error::TrackedChangesForRebase);
+        }
+        Ok(CleanRebaseRepository {
+            repository: self.repository,
+        })
     }
 
     pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
@@ -417,29 +446,14 @@ impl HeadOperationRepository {
         Ok(())
     }
 
-    pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
-        let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
-        if current_branch == branch.name() {
-            return Err(Error::CurrentBranchAsRebaseTarget);
-        }
-        let outcome = self.run_git_operation(branch, ["rebase"])?;
-
-        // ignore errors if we can't record our rebase history to file
-        // the user doesn't know or care that we cache things in a file and failed to write to it
-        // they just want to complete their operation
-        let _ = self
-            .repository
-            .rebase_history
-            .record(RebaseRecord::new(current_branch, branch.name()));
-        Ok(outcome)
-    }
-
     pub fn merge_from(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
         let current_branch = self.current_branch()?.ok_or(Error::DetachedHeadForMerge)?;
         if current_branch == branch.name() {
             return Err(Error::CurrentBranchAsMergeSource);
         }
-        let outcome = self.run_git_operation(branch, ["merge", "--no-edit"])?;
+        let outcome = self
+            .repository
+            .run_git_operation(branch, ["merge", "--no-edit"])?;
 
         // Merge history is only a ranking cache; its failure must not fail the merge.
         let _ = self
@@ -449,41 +463,42 @@ impl HeadOperationRepository {
 
         Ok(outcome)
     }
+}
 
-    fn run_git_operation<'a, 'b>(
-        &'a self,
-        branch: &LocalBranch,
-        arguments: impl IntoIterator<Item = &'b str>,
-    ) -> Result<ConflictableCommandOutcome, Error> {
-        let other_branch = self
+impl CleanRebaseRepository {
+    pub fn local_branches(&self) -> Result<Vec<LocalBranch>, Error> {
+        self.repository.local_branches()
+    }
+
+    pub fn current_branch(&self) -> Result<Option<String>, Error> {
+        self.repository.current_branch()
+    }
+
+    pub fn last_rebase_target(&self) -> Result<Option<String>, Error> {
+        let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
+        Ok(self
             .repository
-            .find_branch(branch)?
-            .get()
-            .name()?
-            .to_string();
-        let worktree = &self.repository.worktree;
+            .rebase_history
+            .load()?
+            .target_for(&current_branch)
+            .map(str::to_owned))
+    }
 
-        let mut args: Vec<&str> = arguments.into_iter().collect();
-        args.push(&other_branch);
-        let command = args[0].to_string();
-        let had_conflicts = has_conflicts(worktree)?;
-
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(worktree)
-            .output()?;
-
-        if output.status.success() {
-            Ok(ConflictableCommandOutcome::Completed)
-        } else if !had_conflicts && has_conflicts(worktree)? {
-            Ok(ConflictableCommandOutcome::Conflicted)
-        } else {
-            Err(Error::CommandFailed {
-                command,
-                status: output.status,
-                message: command_message(&output.stdout, &output.stderr),
-            })
+    pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
+        let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
+        if current_branch == branch.name() {
+            return Err(Error::CurrentBranchAsRebaseTarget);
         }
+        let outcome = self.repository.run_git_operation(branch, ["rebase"])?;
+
+        // ignore errors if we can't record our rebase history to file
+        // the user doesn't know or care that we cache things in a file and failed to write to it
+        // they just want to complete their operation
+        let _ = self
+            .repository
+            .rebase_history
+            .record(RebaseRecord::new(current_branch, branch.name()));
+        Ok(outcome)
     }
 }
 
@@ -549,10 +564,8 @@ pub enum Error {
     BareRepository,
     #[error("cannot perform this operation while a Git {0} operation is in progress")]
     OperationInProgress(InProgressOperation),
-    #[error(
-        "cannot perform this operation with staged or unstaged tracked changes; commit or stash them first"
-    )]
-    TrackedChanges,
+    #[error("cannot rebase with staged or unstaged tracked changes; commit or stash them first")]
+    TrackedChangesForRebase,
     #[error("git {command} failed with {status}: {message}")]
     CommandFailed {
         command: String,
@@ -817,21 +830,23 @@ mod tests {
     }
 
     #[test]
-    fn tracked_unstaged_changes_prevent_head_operations() {
+    fn tracked_unstaged_changes_allow_head_operations_but_prevent_rebase() {
         let (directory, repository) = repository_with_tracked_file();
         fs::write(directory.path().join("tracked.txt"), "modified\n")
             .expect("tracked file should be modified");
 
         let error = Repository::new(repository)
             .into_head_operation()
+            .expect("tracked changes should allow switch and merge")
+            .into_clean_rebase()
             .err()
-            .expect("unstaged changes should be rejected");
+            .expect("unstaged changes should prevent rebase");
 
-        assert!(matches!(error, Error::TrackedChanges));
+        assert!(matches!(error, Error::TrackedChangesForRebase));
     }
 
     #[test]
-    fn tracked_staged_changes_prevent_head_operations() {
+    fn tracked_staged_changes_allow_head_operations_but_prevent_rebase() {
         let (directory, repository) = repository_with_tracked_file();
         fs::write(directory.path().join("tracked.txt"), "modified\n")
             .expect("tracked file should be modified");
@@ -845,10 +860,12 @@ mod tests {
 
         let error = Repository::new(repository)
             .into_head_operation()
+            .expect("tracked changes should allow switch and merge")
+            .into_clean_rebase()
             .err()
-            .expect("staged changes should be rejected");
+            .expect("staged changes should prevent rebase");
 
-        assert!(matches!(error, Error::TrackedChanges));
+        assert!(matches!(error, Error::TrackedChangesForRebase));
     }
 
     #[test]
@@ -864,7 +881,9 @@ mod tests {
 
         Repository::new(repository)
             .into_head_operation()
-            .expect("untracked and ignored files should be allowed");
+            .expect("untracked and ignored files should allow switch and merge")
+            .into_clean_rebase()
+            .expect("untracked and ignored files should allow rebase");
     }
 
     #[test]
@@ -1241,7 +1260,9 @@ mod tests {
             .expect("main branch should exist");
         let repository = repository
             .into_head_operation()
-            .expect("repository should allow HEAD operations");
+            .expect("repository should allow HEAD operations")
+            .into_clean_rebase()
+            .expect("repository should allow rebase");
 
         let outcome = repository
             .rebase_onto(&main)
@@ -1697,7 +1718,9 @@ mod tests {
             .expect("feature branch should exist");
         let repository = repository
             .into_head_operation()
-            .expect("repository should allow HEAD operations");
+            .expect("repository should allow HEAD operations")
+            .into_clean_rebase()
+            .expect("repository should allow rebase");
 
         let outcome = repository
             .rebase_onto(&feature)
@@ -1750,7 +1773,9 @@ mod tests {
             .expect("main branch should exist");
         let repository = repository
             .into_head_operation()
-            .expect("repository should allow HEAD operations");
+            .expect("repository should allow HEAD operations")
+            .into_clean_rebase()
+            .expect("repository should allow rebase");
 
         let error = repository
             .rebase_onto(&main)
@@ -1806,7 +1831,9 @@ mod tests {
             .expect("feature branch should exist");
         let repository = repository
             .into_head_operation()
-            .expect("repository should allow HEAD operations");
+            .expect("repository should allow HEAD operations")
+            .into_clean_rebase()
+            .expect("repository should allow rebase");
 
         let outcome = repository
             .rebase_onto(&feature)

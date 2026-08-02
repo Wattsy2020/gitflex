@@ -6,7 +6,7 @@ mod switch_history;
 
 pub use merge_history::MergeHistory;
 pub use repository::{
-    Checkout, CleanBranch, ConflictableCommandOutcome, Error, HeadOperationRepository, LocalBranch,
-    Repository,
+    Checkout, CleanBranch, CleanRebaseRepository, ConflictableCommandOutcome, Error,
+    HeadOperationRepository, LocalBranch, Repository,
 };
 pub use switch_history::SwitchHistory;

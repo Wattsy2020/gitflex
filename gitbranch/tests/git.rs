@@ -302,6 +302,75 @@ fn switches_to_branch_created_by_git_cli() {
 }
 
 #[test]
+fn switches_with_compatible_unstaged_tracked_changes() {
+    let test_repository = TestRepository::new();
+    test_repository.commit_file("local.txt", "base\n", "Add local file");
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature file");
+    test_repository.switch_to("main");
+    fs::write(test_repository.path.join("local.txt"), "modified\n")
+        .expect("tracked file should be modified");
+
+    let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+    let repository = repository
+        .into_head_operation()
+        .expect("tracked changes should allow switching");
+
+    repository
+        .switch_to(&feature)
+        .expect("compatible tracked changes should be preserved");
+
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "feature"
+    );
+    assert_eq!(
+        fs::read_to_string(test_repository.path.join("local.txt"))
+            .expect("tracked file should remain"),
+        "modified\n"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["status", "--porcelain"]),
+        "M local.txt"
+    );
+}
+
+#[test]
+fn conflicting_tracked_changes_prevent_switch_without_data_loss() {
+    let test_repository = TestRepository::new();
+    test_repository.commit_file("shared.txt", "base\n", "Add shared file");
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("shared.txt", "feature\n", "Update shared file");
+    test_repository.switch_to("main");
+    fs::write(test_repository.path.join("shared.txt"), "local\n")
+        .expect("tracked file should be modified");
+
+    let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+    let repository = repository
+        .into_head_operation()
+        .expect("tracked changes should allow branch selection");
+
+    let error = repository
+        .switch_to(&feature)
+        .expect_err("conflicting tracked changes should prevent switching");
+
+    assert!(!error.to_string().is_empty());
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "main"
+    );
+    assert_eq!(
+        fs::read_to_string(test_repository.path.join("shared.txt"))
+            .expect("tracked file should remain"),
+        "local\n"
+    );
+}
+
+#[test]
 fn merges_diverged_branch_into_state_validated_by_git_cli() {
     let test_repository = TestRepository::new();
     test_repository.create_branch("feature");
@@ -351,6 +420,90 @@ fn merges_diverged_branch_into_state_validated_by_git_cli() {
         fs::read_to_string(test_repository.path.join(".git/gitbranch-merges"))
             .expect("merge history should be readable"),
         "main\tfeature\t0\n"
+    );
+}
+
+#[test]
+fn merges_with_compatible_staged_tracked_changes() {
+    let test_repository = TestRepository::new();
+    test_repository.commit_file("local.txt", "base\n", "Add local file");
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature file");
+    test_repository.switch_to("main");
+    fs::write(test_repository.path.join("local.txt"), "modified\n")
+        .expect("tracked file should be modified");
+    test_repository.git_success(&["add", "--", "local.txt"]);
+
+    let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+    let repository = repository
+        .into_head_operation()
+        .expect("tracked changes should allow merging");
+
+    let outcome = repository
+        .merge_from(&feature)
+        .expect("compatible tracked changes should be preserved");
+
+    assert_eq!(outcome, ConflictableCommandOutcome::Completed);
+    assert_eq!(
+        fs::read_to_string(test_repository.path.join("local.txt"))
+            .expect("tracked file should remain"),
+        "modified\n"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["show", "HEAD:feature.txt"]),
+        "feature"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["status", "--porcelain"]),
+        "M  local.txt"
+    );
+}
+
+#[test]
+fn conflicting_tracked_changes_prevent_merge_without_data_loss() {
+    let test_repository = TestRepository::new();
+    test_repository.commit_file("shared.txt", "base\n", "Add shared file");
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("shared.txt", "feature\n", "Update shared file");
+    test_repository.switch_to("main");
+    fs::write(test_repository.path.join("shared.txt"), "local\n")
+        .expect("tracked file should be modified");
+
+    let repository = test_repository.discover();
+    let feature = branch(&repository, "feature");
+    let repository = repository
+        .into_head_operation()
+        .expect("tracked changes should allow branch selection");
+
+    let error = repository
+        .merge_from(&feature)
+        .expect_err("conflicting tracked changes should prevent merging");
+
+    assert!(matches!(
+        error,
+        Error::CommandFailed {
+            command,
+            message,
+            ..
+        } if command == "merge" && !message.is_empty()
+    ));
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "main"
+    );
+    assert_eq!(
+        fs::read_to_string(test_repository.path.join("shared.txt"))
+            .expect("tracked file should remain"),
+        "local\n"
+    );
+    assert!(
+        !test_repository
+            .git(&["rev-parse", "--verify", "MERGE_HEAD"])
+            .status
+            .success()
     );
 }
 
@@ -424,7 +577,9 @@ fn rebases_diverged_branch_into_state_validated_by_git_cli() {
     let feature = branch(&repository, "feature");
     let repository = repository
         .into_head_operation()
-        .expect("repository should allow HEAD operations");
+        .expect("repository should allow HEAD operations")
+        .into_clean_rebase()
+        .expect("repository should allow rebase");
 
     let outcome = repository
         .rebase_onto(&feature)
@@ -481,7 +636,9 @@ fn conflicted_rebase_can_be_continued_by_git_cli() {
     let feature = branch(&repository, "feature");
     let repository = repository
         .into_head_operation()
-        .expect("repository should allow HEAD operations");
+        .expect("repository should allow HEAD operations")
+        .into_clean_rebase()
+        .expect("repository should allow rebase");
 
     // try to rebase
     let outcome = repository
