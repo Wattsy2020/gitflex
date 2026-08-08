@@ -21,14 +21,14 @@ pub fn run_clean(repository: &Repository) -> Result<(), Error> {
     clean::run(repository)
 }
 
-pub fn run_switch(repository: &HeadOperationRepository) -> Result<(), Error> {
-    switch::run(repository)
+pub fn run_switch(repository: &HeadOperationRepository, branch: Option<&str>) -> Result<(), Error> {
+    switch::run(repository, branch)
 }
 
-pub fn run_rebase(repository: &CleanRebaseRepository) -> Result<(), Error> {
-    rebase::run(repository)
+pub fn run_rebase(repository: &CleanRebaseRepository, branch: Option<&str>) -> Result<(), Error> {
+    rebase::run(repository, branch)
 }
 
-pub fn run_merge(repository: &HeadOperationRepository) -> Result<(), Error> {
-    merge::run(repository)
+pub fn run_merge(repository: &HeadOperationRepository, branch: Option<&str>) -> Result<(), Error> {
+    merge::run(repository, branch)
 }

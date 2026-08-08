@@ -7,7 +7,7 @@ use crate::{
     },
 };
 
-pub fn run(repository: &CleanRebaseRepository) -> Result<(), Error> {
+pub fn run(repository: &CleanRebaseRepository, branch: Option<&str>) -> Result<(), Error> {
     let current_branch = repository
         .current_branch()?
         .ok_or(git::Error::DetachedHead)?;
@@ -18,7 +18,7 @@ pub fn run(repository: &CleanRebaseRepository) -> Result<(), Error> {
     let last_target = repository.last_rebase_target().unwrap_or_default();
     let branches = repository.local_branches()?;
 
-    match ui::run_rebase_app(branches, last_target)? {
+    match ui::run_rebase_app(branches, last_target, branch)? {
         Unavailable => println!("No branches available to rebase onto."),
         Cancelled => println!("Cancelled."),
         Selected(branch) => match repository.rebase_onto(&branch)? {

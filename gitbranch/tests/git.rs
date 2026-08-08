@@ -81,6 +81,23 @@ impl TestRepository {
         self.git_at(&self.path, arguments)
     }
 
+    fn gitbranch(&self, arguments: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_gitbranch"))
+            .current_dir(&self.path)
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", &self.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .args(arguments)
+            .output()
+            .expect("gitbranch should be executable")
+    }
+
     fn git_success_at(&self, path: &Path, arguments: &[&str]) -> Output {
         let output = self.git_at(path, arguments);
         assert_success(arguments, &output);
@@ -150,6 +167,17 @@ fn assert_success(arguments: &[&str], output: &Output) {
     assert!(
         output.status.success(),
         "git {} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        arguments.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn assert_gitbranch_success(arguments: &[&str], output: &Output) {
+    assert!(
+        output.status.success(),
+        "gitbranch {} failed with {}\nstdout:\n{}\nstderr:\n{}",
         arguments.join(" "),
         output.status,
         String::from_utf8_lossy(&output.stdout),
@@ -302,6 +330,30 @@ fn switches_to_branch_created_by_git_cli() {
 }
 
 #[test]
+fn command_line_branch_switches_without_opening_the_ui_and_records_history() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+
+    let output = test_repository.gitbranch(&["switch", "feature"]);
+
+    assert_gitbranch_success(&["switch", "feature"], &output);
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "Switched to branch feature.\n"
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "feature"
+    );
+    assert_eq!(
+        fs::read_to_string(test_repository.path.join(".git/gitbranch-switches"))
+            .expect("switch history should be readable"),
+        "feature\t0\n"
+    );
+}
+
+#[test]
 fn switches_with_compatible_unstaged_tracked_changes() {
     let test_repository = TestRepository::new();
     test_repository.commit_file("local.txt", "base\n", "Add local file");
@@ -421,6 +473,54 @@ fn merges_diverged_branch_into_state_validated_by_git_cli() {
             .expect("merge history should be readable"),
         "main\tfeature\t0\n"
     );
+}
+
+#[test]
+fn command_line_branch_merges_without_opening_the_ui_and_records_history() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature");
+    test_repository.switch_to("main");
+    test_repository.commit_file("main.txt", "main\n", "Add main change");
+
+    let output = test_repository.gitbranch(&["merge", "feature"]);
+
+    assert_gitbranch_success(&["merge", "feature"], &output);
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "Merged feature into main.\n"
+    );
+    assert!(output.stderr.is_empty());
+    assert_success(
+        &["merge-base", "--is-ancestor", "feature", "main"],
+        &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
+    );
+    assert_eq!(
+        fs::read_to_string(test_repository.path.join(".git/gitbranch-merges"))
+            .expect("merge history should be readable"),
+        "main\tfeature\t0\n"
+    );
+}
+
+#[test]
+fn invalid_exact_command_line_branch_uses_existing_validation() {
+    let test_repository = TestRepository::new();
+    let original_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
+
+    let output = test_repository.gitbranch(&["merge", "main"]);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr should be valid UTF-8"),
+        "the current branch cannot be merged into itself\n"
+    );
+    assert_eq!(
+        test_repository.git_stdout(&["rev-parse", "HEAD"]),
+        original_tip
+    );
+    assert!(!test_repository.path.join(".git/gitbranch-merges").exists());
 }
 
 #[test]
@@ -618,6 +718,34 @@ fn rebases_diverged_branch_into_state_validated_by_git_cli() {
         test_repository
             .git_stdout(&["status", "--porcelain"])
             .is_empty()
+    );
+}
+
+#[test]
+fn command_line_branch_rebases_without_opening_the_ui_and_records_history() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature");
+    test_repository.switch_to("main");
+    test_repository.commit_file("main.txt", "main\n", "Add main change");
+
+    let output = test_repository.gitbranch(&["rebase", "feature"]);
+
+    assert_gitbranch_success(&["rebase", "feature"], &output);
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "Rebased main onto feature.\n"
+    );
+    assert!(output.stderr.is_empty());
+    assert_success(
+        &["merge-base", "--is-ancestor", "feature", "main"],
+        &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
+    );
+    assert_eq!(
+        fs::read_to_string(test_repository.path.join(".git/gitbranch-rebases"))
+            .expect("rebase history should be readable"),
+        "main\tfeature\n"
     );
 }
 

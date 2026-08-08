@@ -283,12 +283,16 @@ impl AppImpl<CleanMode> {
         for (original_rank, branch) in branches.iter_mut().enumerate() {
             branch.original_rank = original_rank;
         }
-        Self::from_branches(branches, CleanMode)
+        Self::from_branches(branches, CleanMode, Search::default())
     }
 }
 
 impl AppImpl<SingleMode> {
-    pub fn switch(mut branches: Vec<LocalBranch>, history: &SwitchHistory) -> Option<Self> {
+    pub fn switch(
+        mut branches: Vec<LocalBranch>,
+        history: &SwitchHistory,
+        initial_search: Option<String>,
+    ) -> Option<Self> {
         branches.sort_by(|left, right| {
             history
                 .rank(right.name())
@@ -301,10 +305,15 @@ impl AppImpl<SingleMode> {
             SingleMode {
                 operation: SingleOperation::Switch,
             },
+            initial_search,
         )
     }
 
-    pub fn rebase(mut branches: Vec<LocalBranch>, last_target: Option<String>) -> Option<Self> {
+    pub fn rebase(
+        mut branches: Vec<LocalBranch>,
+        last_target: Option<String>,
+        initial_search: Option<String>,
+    ) -> Option<Self> {
         if let Some(last_target) = last_target.as_deref() {
             branches.sort_by(|left, right| {
                 let left_was_last = last_target == left.name();
@@ -320,6 +329,7 @@ impl AppImpl<SingleMode> {
             SingleMode {
                 operation: SingleOperation::Rebase { last_target },
             },
+            initial_search,
         )
     }
 
@@ -327,6 +337,7 @@ impl AppImpl<SingleMode> {
         mut branches: Vec<LocalBranch>,
         destination: &str,
         history: &MergeHistory,
+        initial_search: Option<String>,
     ) -> Option<Self> {
         branches.sort_by(|left, right| {
             history
@@ -340,10 +351,15 @@ impl AppImpl<SingleMode> {
             SingleMode {
                 operation: SingleOperation::Merge,
             },
+            initial_search,
         )
     }
 
-    fn new(mut branches: Vec<LocalBranch>, mode: SingleMode) -> Option<Self> {
+    fn new(
+        mut branches: Vec<LocalBranch>,
+        mode: SingleMode,
+        initial_search: Option<String>,
+    ) -> Option<Self> {
         branches.sort_by_key(|branch| !mode.is_selectable(branch));
         let branches = branches
             .into_iter()
@@ -353,12 +369,16 @@ impl AppImpl<SingleMode> {
                 Branch::new(branch, selectable, false, original_rank)
             })
             .collect();
-        Self::from_branches(branches, mode)
+        Self::from_branches(
+            branches,
+            mode,
+            Search::new(initial_search.unwrap_or_default()),
+        )
     }
 }
 
 impl<M> AppImpl<M> {
-    fn from_branches(branches: Vec<Branch>, mode: M) -> Option<Self> {
+    fn from_branches(branches: Vec<Branch>, mode: M, search: Search) -> Option<Self> {
         let selectable_count = NonZeroUsize::new(
             branches
                 .iter()
@@ -369,9 +389,10 @@ impl<M> AppImpl<M> {
             branches,
             mode,
             selectable_count,
-            search: Search::default(),
+            search,
             state: ListState::default(),
         };
+        app.sort_for_search();
         app.select_first_branch();
         Some(app)
     }
@@ -439,10 +460,14 @@ impl<M> AppImpl<M> {
             return;
         }
 
+        self.sort_for_search();
+        self.select_first_branch();
+    }
+
+    fn sort_for_search(&mut self) {
         let search = &self.search;
         self.branches
             .sort_unstable_by_key(|branch| (!search.matches(branch.name()), branch.original_rank));
-        self.select_first_branch();
     }
 
     fn output(&self) -> Option<M::Output>
@@ -671,6 +696,7 @@ mod tests {
                 branch("main", Checkout::CurrentWorktree),
             ],
             None,
+            None,
         )
         .unwrap();
         assert_eq!(app.update(Action::Next), Transition::Continue);
@@ -704,19 +730,19 @@ mod tests {
             ["develop", "release", "feature", "main"]
         );
 
-        let switch = AppImpl::switch(branches(), &SwitchHistory::default()).unwrap();
+        let switch = AppImpl::switch(branches(), &SwitchHistory::default(), None).unwrap();
         assert_eq!(
             branch_names(&switch),
             ["develop", "release", "feature", "main"]
         );
 
-        let rebase = AppImpl::rebase(branches(), None).unwrap();
+        let rebase = AppImpl::rebase(branches(), None, None).unwrap();
         assert_eq!(
             branch_names(&rebase),
             ["develop", "feature", "release", "main"]
         );
 
-        let merge = AppImpl::merge(branches(), "main", &MergeHistory::default()).unwrap();
+        let merge = AppImpl::merge(branches(), "main", &MergeHistory::default(), None).unwrap();
         assert_eq!(
             branch_names(&merge),
             ["develop", "feature", "release", "main"]
@@ -736,6 +762,7 @@ mod tests {
                 branch("review", Checkout::Available),
             ],
             &history,
+            None,
         )
         .unwrap();
 
@@ -766,6 +793,7 @@ mod tests {
             ],
             "main",
             &history,
+            None,
         )
         .unwrap();
 
@@ -818,6 +846,7 @@ mod tests {
                 branch("FEATURE-two", Checkout::Available),
                 branch("main", Checkout::CurrentWorktree),
             ],
+            None,
             None,
         )
         .unwrap();
@@ -875,6 +904,7 @@ mod tests {
                 branch("main", Checkout::Available),
             ],
             None,
+            None,
         )
         .unwrap();
 
@@ -895,6 +925,7 @@ mod tests {
                 branch("main", Checkout::CurrentWorktree),
             ],
             None,
+            None,
         )
         .unwrap();
         type_query(&mut app, "release");
@@ -907,6 +938,48 @@ mod tests {
             panic!("the highlighted search result should be selectable");
         };
         assert_eq!(branch.name(), "beta-release");
+    }
+
+    #[test]
+    fn initial_search_uses_the_same_ordering_and_selectability_as_typed_search() {
+        let app = AppImpl::rebase(
+            vec![
+                branch("develop", Checkout::Available),
+                branch("feature", Checkout::CurrentWorktree),
+                branch("feature-review", Checkout::Available),
+                branch("main", Checkout::Available),
+            ],
+            None,
+            Some("FEATURE".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            branch_names(&app),
+            ["feature-review", "feature", "develop", "main"]
+        );
+        assert_eq!(highlighted_branch_name(&app), "feature-review");
+        assert!(app.search.is_active());
+        assert!(app.search.matches("feature-review"));
+    }
+
+    #[test]
+    fn unmatched_initial_search_preserves_canonical_order() {
+        let history = SwitchHistory::for_test(["review", "develop"]);
+        let app = AppImpl::switch(
+            vec![
+                branch("alpha", Checkout::Available),
+                branch("develop", Checkout::Available),
+                branch("review", Checkout::Available),
+                branch("main", Checkout::CurrentWorktree),
+            ],
+            &history,
+            Some("missing".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(branch_names(&app), ["review", "develop", "alpha", "main"]);
+        assert_eq!(highlighted_branch_name(&app), "review");
     }
 
     #[test]
@@ -939,6 +1012,7 @@ mod tests {
                 branch("main", Checkout::CurrentWorktree),
             ],
             None,
+            None,
         )
         .unwrap();
         type_query(&mut app, "feat");
@@ -968,6 +1042,30 @@ mod tests {
     }
 
     #[test]
+    fn rendering_an_initial_search_places_the_cursor_after_its_text() {
+        let mut app = AppImpl::merge(
+            vec![
+                branch("feature", Checkout::Available),
+                branch("main", Checkout::CurrentWorktree),
+            ],
+            "main",
+            &MergeHistory::default(),
+            Some("feat".to_owned()),
+        )
+        .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let backend = terminal.backend();
+        assert!(buffer_row(backend.buffer(), 1).contains("feat"));
+        assert_eq!(
+            backend.cursor_position(),
+            ratatui::layout::Position::new(5, 1)
+        );
+    }
+
+    #[test]
     fn clean_navigation_includes_unselected_but_skips_unselectable_branches() {
         let mut app = AppImpl::clean(vec![
             unselectable("main", Checkout::CurrentWorktree),
@@ -994,6 +1092,7 @@ mod tests {
                 branch("main", Checkout::CurrentWorktree),
             ],
             &SwitchHistory::default(),
+            None,
         )
         .unwrap();
 
@@ -1018,6 +1117,7 @@ mod tests {
             ],
             "main",
             &MergeHistory::default(),
+            None,
         )
         .unwrap();
 
@@ -1032,6 +1132,7 @@ mod tests {
         let mut app = AppImpl::switch(
             vec![branch("feature", Checkout::Available)],
             &SwitchHistory::default(),
+            None,
         )
         .unwrap();
 
@@ -1048,6 +1149,7 @@ mod tests {
                 branch("develop", Checkout::Available),
             ],
             Some("main".to_string()),
+            None,
         )
         .unwrap();
 
@@ -1075,6 +1177,7 @@ mod tests {
                 branch("main", Checkout::CurrentWorktree),
             ],
             Some("main".to_string()),
+            None,
         )
         .unwrap();
 
@@ -1094,6 +1197,7 @@ mod tests {
                 branch("develop", Checkout::Available),
             ],
             Some("deleted".to_string()),
+            None,
         )
         .unwrap();
 

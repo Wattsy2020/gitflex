@@ -15,8 +15,27 @@ pub(super) struct Search {
 }
 
 impl Search {
+    pub(super) fn new(value: String) -> Self {
+        let matcher = Self::build_matcher(&value);
+        Self {
+            input: Input::new(value),
+            matcher,
+        }
+    }
+
+    fn build_matcher(search_term: &str) -> Option<Regex> {
+        (!search_term.is_empty())
+            .then(|| {
+                RegexBuilder::new(&regex::escape(search_term))
+                    .case_insensitive(true)
+                    .build()
+                    .ok()
+            })
+            .flatten()
+    }
+
     pub(super) fn is_active(&self) -> bool {
-        self.matcher.is_some()
+        !self.input.value().is_empty()
     }
 
     pub(super) fn edit(&mut self, request: InputRequest) -> bool {
@@ -31,10 +50,7 @@ impl Search {
                 self.matcher = None
             }
             // if we failed to build (due to too large a search term), keep the old one
-            else if let Ok(new_matcher) = RegexBuilder::new(&regex::escape(search_term))
-                .case_insensitive(true)
-                .build()
-            {
+            else if let Some(new_matcher) = Self::build_matcher(search_term) {
                 self.matcher = Some(new_matcher);
             }
         }
@@ -117,6 +133,16 @@ mod tests {
         assert!(!search.is_active());
         assert!(!search.matches("feature"));
         assert!(search.match_ranges("feature").is_empty());
+    }
+
+    #[test]
+    fn initial_search_is_case_insensitive_and_literal() {
+        let search = Search::new("F.A".to_owned());
+
+        assert!(search.is_active());
+        assert!(search.matches("feature/f.a"));
+        assert!(search.matches("F.A"));
+        assert!(!search.matches("feature/fxa"));
     }
 
     #[test]
