@@ -86,20 +86,12 @@ ON CONFLICT (destination, source) DO UPDATE SET rank = excluded.rank
     })
 }
 
-pub(super) fn prune(database_path: &Path, existing_branches: Vec<String>) -> Result<()> {
-    history::prune(database_path, existing_branches, history::Table::Merge)
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
 
-    use super::{MergeHistory, MergeRecord, prune, read, write};
-    use crate::history::{
-        database_path,
-        rebase::{self, RebaseRecord},
-        switch,
-    };
+    use super::{MergeHistory, MergeRecord, read, write};
+    use crate::history::database_path;
 
     #[test]
     fn missing_history_is_empty_and_destinations_are_independent() {
@@ -122,49 +114,5 @@ mod tests {
         assert_eq!(history.rank("main", "feature"), Some(3));
         assert_eq!(history.rank("release", "feature"), Some(2));
         assert_eq!(history.rank("main", "unknown"), None);
-    }
-
-    #[test]
-    fn pruning_removes_rows_with_either_branch_missing_and_only_changes_merge_history() {
-        let directory = TempDir::new().expect("temporary directory should be created");
-        let database_path = database_path(directory.path());
-        write(&database_path, MergeRecord::new("main", "feature"))
-            .expect("existing merge should be recorded");
-        write(&database_path, MergeRecord::new("deleted", "feature"))
-            .expect("stale destination should be recorded");
-        write(&database_path, MergeRecord::new("main", "deleted"))
-            .expect("stale source should be recorded");
-        switch::write(&database_path, "deleted".to_owned()).expect("switch should be recorded");
-        rebase::write(&database_path, RebaseRecord::new("main", "deleted"))
-            .expect("rebase should be recorded");
-
-        prune(
-            &database_path,
-            vec!["main".to_owned(), "feature".to_owned()],
-        )
-        .expect("merge history should be pruned");
-
-        let merge_history = read(&database_path).expect("merge history should be readable");
-        assert_eq!(merge_history.rank("main", "feature"), Some(1));
-        assert_eq!(merge_history.rank("deleted", "feature"), None);
-        assert_eq!(merge_history.rank("main", "deleted"), None);
-        assert_eq!(
-            switch::read(&database_path)
-                .expect("switch history should be readable")
-                .rank("deleted"),
-            Some(1)
-        );
-        assert_eq!(
-            rebase::read(&database_path)
-                .expect("rebase history should be readable")
-                .target_for("main"),
-            Some("deleted")
-        );
-
-        prune(&database_path, Vec::new()).expect("empty repositories should clear merge history");
-        assert_eq!(
-            read(&database_path).expect("merge history should be readable"),
-            MergeHistory::default()
-        );
     }
 }

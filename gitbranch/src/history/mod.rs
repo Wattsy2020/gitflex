@@ -41,8 +41,12 @@ CREATE TABLE IF NOT EXISTS rebase_history (
 ) STRICT;
 "#;
 
+const DELETE_SWITCH: &str =
+    "DELETE FROM switch_history WHERE branch NOT IN (SELECT branch FROM existing_branches)";
+const DELETE_MERGE: &str = "DELETE FROM merge_history WHERE destination NOT IN (SELECT branch FROM existing_branches) OR source NOT IN (SELECT branch FROM existing_branches)";
+const DELETE_REBASE: &str = "DELETE FROM rebase_history WHERE source NOT IN (SELECT branch FROM existing_branches) OR target NOT IN (SELECT branch FROM existing_branches)";
+
 type ConnectionFuture<'connection, T> = Pin<Box<dyn Future<Output = Result<T>> + 'connection>>;
-type PruneOperation = fn(&Path, Vec<String>) -> Result<()>;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -108,16 +112,30 @@ impl HistoryStore {
         )
     }
 
+    fn prune_in_background(&self, existing_branches: Vec<String>, delete_sql: &'static str) {
+        // this shouldn't happen since the tui will early exit if there are no branches in the repository
+        if existing_branches.is_empty() {
+            return;
+        }
+
+        let path = self.database_path.to_owned();
+        let _ = thread::Builder::new()
+            .name("gitbranch-history-prune".to_owned())
+            .spawn(move || {
+                let _ = prune_missing(&path, existing_branches, delete_sql);
+            });
+    }
+
     pub fn prune_switch_in_background(&self, existing_branches: Vec<String>) {
-        prune_in_background(&self.database_path, existing_branches, switch::prune);
+        self.prune_in_background(existing_branches, DELETE_SWITCH);
     }
 
     pub fn prune_merge_in_background(&self, existing_branches: Vec<String>) {
-        prune_in_background(&self.database_path, existing_branches, merge::prune);
+        self.prune_in_background(existing_branches, DELETE_MERGE);
     }
 
     pub fn prune_rebase_in_background(&self, existing_branches: Vec<String>) {
-        prune_in_background(&self.database_path, existing_branches, rebase::prune);
+        self.prune_in_background(existing_branches, DELETE_REBASE);
     }
 }
 
@@ -125,70 +143,22 @@ pub(super) fn database_path(common_directory: &Path) -> PathBuf {
     common_directory.join(DATABASE_FILE_NAME)
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum Table {
-    Switch,
-    Merge,
-    Rebase,
-}
-
-impl Table {
-    fn delete_all(self) -> &'static str {
-        match self {
-            Self::Switch => "DELETE FROM switch_history",
-            Self::Merge => "DELETE FROM merge_history",
-            Self::Rebase => "DELETE FROM rebase_history",
-        }
-    }
-
-    fn delete_missing(self) -> &'static str {
-        match self {
-            Self::Switch => {
-                "DELETE FROM switch_history WHERE branch NOT IN (SELECT branch FROM existing_branches)"
-            }
-            Self::Merge => {
-                "DELETE FROM merge_history WHERE destination NOT IN (SELECT branch FROM existing_branches) OR source NOT IN (SELECT branch FROM existing_branches)"
-            }
-            Self::Rebase => {
-                "DELETE FROM rebase_history WHERE source NOT IN (SELECT branch FROM existing_branches) OR target NOT IN (SELECT branch FROM existing_branches)"
-            }
-        }
-    }
-}
-
-pub(super) fn prune(
+fn prune_missing(
     database_path: &Path,
     existing_branches: Vec<String>,
-    table: Table,
+    delete_sql: &'static str,
 ) -> Result<()> {
     with_connection(database_path, |connection| {
         Box::pin(async move {
-            if existing_branches.is_empty() {
-                connection.execute(table.delete_all()).await?;
-            } else {
-                let mut query = QueryBuilder::<Sqlite>::new("WITH existing_branches(branch) AS (");
-                query.push_values(existing_branches, |mut row, branch| {
-                    row.push_bind(branch);
-                });
-                query.push(") ").push(table.delete_missing());
-                query.build().execute(connection).await?;
-            }
+            let mut query = QueryBuilder::<Sqlite>::new("WITH existing_branches(branch) AS (");
+            query.push_values(existing_branches, |mut row, branch| {
+                row.push_bind(branch);
+            });
+            query.push(") ").push(delete_sql);
+            query.build().execute(connection).await?;
             Ok(())
         })
     })
-}
-
-pub(super) fn prune_in_background(
-    database_path: &Path,
-    existing_branches: Vec<String>,
-    operation: PruneOperation,
-) {
-    let database_path = database_path.to_owned();
-    let _ = thread::Builder::new()
-        .name("gitbranch-history-prune".to_owned())
-        .spawn(move || {
-            let _ = operation(&database_path, existing_branches);
-        });
 }
 
 pub(super) fn with_connection<T>(
@@ -223,4 +193,128 @@ pub(super) fn rank_from_database(rank: i64) -> Result<usize> {
         .ok()
         .filter(|rank| *rank > 0)
         .ok_or(Error::InvalidRank(rank))
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::{DELETE_MERGE, DELETE_REBASE, DELETE_SWITCH, HistoryStore, prune_missing};
+
+    struct HistoryFixture {
+        _directory: TempDir,
+        store: HistoryStore,
+    }
+
+    impl HistoryFixture {
+        fn new() -> Self {
+            let directory = TempDir::new().expect("temporary directory should be created");
+            let store = HistoryStore::new(directory.path());
+            for branch in ["feature", "deleted"] {
+                store
+                    .record_switch(branch)
+                    .expect("switch should be recorded");
+            }
+            for (destination, source) in [
+                ("main", "feature"),
+                ("deleted", "feature"),
+                ("main", "deleted"),
+            ] {
+                store
+                    .record_merge(destination, source)
+                    .expect("merge should be recorded");
+            }
+            for (source, target) in [
+                ("feature", "main"),
+                ("deleted", "main"),
+                ("other", "deleted"),
+            ] {
+                store
+                    .record_rebase(source, target)
+                    .expect("rebase should be recorded");
+            }
+
+            Self {
+                _directory: directory,
+                store,
+            }
+        }
+
+        fn prune(&self, delete_sql: &'static str) {
+            prune_missing(&self.store.database_path, existing_branches(), delete_sql)
+                .expect("history should be pruned");
+        }
+
+        fn switch_rank(&self, branch: &str) -> Option<usize> {
+            self.store
+                .read_switch()
+                .expect("switch history should be readable")
+                .rank(branch)
+        }
+
+        fn merge_rank(&self, destination: &str, source: &str) -> Option<usize> {
+            self.store
+                .read_merge()
+                .expect("merge history should be readable")
+                .rank(destination, source)
+        }
+
+        fn rebase_target(&self, source: &str) -> Option<String> {
+            self.store
+                .last_rebase_target(source)
+                .expect("rebase history should be readable")
+        }
+    }
+
+    fn existing_branches() -> Vec<String> {
+        ["main", "feature", "other"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn pruning_removes_missing_branches_from_only_the_selected_history() {
+        let fixture = HistoryFixture::new();
+
+        fixture.prune(DELETE_SWITCH);
+
+        assert_eq!(fixture.switch_rank("feature"), Some(1));
+        assert_eq!(fixture.switch_rank("deleted"), None);
+        assert_eq!(fixture.merge_rank("main", "deleted"), Some(3));
+        assert_eq!(fixture.rebase_target("deleted"), Some("main".to_owned()));
+
+        fixture
+            .store
+            .record_switch("review")
+            .expect("a switch after pruning should be recorded");
+        assert_eq!(fixture.switch_rank("review"), Some(3));
+
+        fixture.prune(DELETE_MERGE);
+
+        assert_eq!(fixture.merge_rank("main", "feature"), Some(1));
+        assert_eq!(fixture.merge_rank("deleted", "feature"), None);
+        assert_eq!(fixture.merge_rank("main", "deleted"), None);
+        assert_eq!(fixture.rebase_target("other"), Some("deleted".to_owned()));
+
+        fixture.prune(DELETE_REBASE);
+
+        assert_eq!(fixture.rebase_target("feature"), Some("main".to_owned()));
+        assert_eq!(fixture.rebase_target("deleted"), None);
+        assert_eq!(fixture.rebase_target("other"), None);
+        assert_eq!(fixture.switch_rank("review"), Some(3));
+    }
+
+    #[test]
+    fn empty_branch_lists_skip_background_pruning() {
+        let fixture = HistoryFixture::new();
+
+        fixture.store.prune_switch_in_background(Vec::new());
+        fixture.store.prune_merge_in_background(Vec::new());
+        fixture.store.prune_rebase_in_background(Vec::new());
+
+        assert_eq!(fixture.switch_rank("deleted"), Some(2));
+        assert_eq!(fixture.merge_rank("main", "deleted"), Some(3));
+        assert_eq!(fixture.rebase_target("other"), Some("deleted".to_owned()));
+    }
 }

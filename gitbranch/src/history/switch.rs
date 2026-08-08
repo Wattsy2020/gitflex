@@ -60,10 +60,6 @@ ON CONFLICT (branch) DO UPDATE SET rank = excluded.rank
     })
 }
 
-pub(super) fn prune(database_path: &Path, existing_branches: Vec<String>) -> Result<()> {
-    history::prune(database_path, existing_branches, history::Table::Switch)
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -73,12 +69,8 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{SwitchHistory, prune, read, write};
-    use crate::history::{
-        database_path,
-        merge::{self, MergeRecord},
-        rebase::{self, RebaseRecord},
-    };
+    use super::{SwitchHistory, read, write};
+    use crate::history::database_path;
 
     #[test]
     fn missing_history_is_empty_and_repeated_branches_receive_the_next_rank() {
@@ -115,54 +107,6 @@ mod tests {
         assert_eq!(
             fs::read_to_string(legacy_path).expect("legacy history should remain readable"),
             "feature\t99\n"
-        );
-    }
-
-    #[test]
-    fn pruning_removes_missing_branches_and_only_changes_switch_history() {
-        let directory = TempDir::new().expect("temporary directory should be created");
-        let database_path = database_path(directory.path());
-        write(&database_path, "feature".to_owned()).expect("existing switch should be recorded");
-        write(&database_path, "deleted".to_owned()).expect("stale switch should be recorded");
-        merge::write(&database_path, MergeRecord::new("main", "deleted"))
-            .expect("merge should be recorded");
-        rebase::write(&database_path, RebaseRecord::new("main", "deleted"))
-            .expect("rebase should be recorded");
-
-        prune(
-            &database_path,
-            vec!["main".to_owned(), "feature".to_owned()],
-        )
-        .expect("switch history should be pruned");
-
-        let switch_history = read(&database_path).expect("switch history should be readable");
-        assert_eq!(switch_history.rank("feature"), Some(1));
-        assert_eq!(switch_history.rank("deleted"), None);
-        write(&database_path, "review".to_owned())
-            .expect("a switch after pruning should be recorded");
-        assert_eq!(
-            read(&database_path)
-                .expect("updated switch history should be readable")
-                .rank("review"),
-            Some(3)
-        );
-        assert_eq!(
-            merge::read(&database_path)
-                .expect("merge history should be readable")
-                .rank("main", "deleted"),
-            Some(1)
-        );
-        assert_eq!(
-            rebase::read(&database_path)
-                .expect("rebase history should be readable")
-                .target_for("main"),
-            Some("deleted")
-        );
-
-        prune(&database_path, Vec::new()).expect("empty repositories should clear switch history");
-        assert_eq!(
-            read(&database_path).expect("switch history should be readable"),
-            SwitchHistory::default()
         );
     }
 
