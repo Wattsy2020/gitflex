@@ -8,7 +8,12 @@ clap = { version = "4", features = ["derive"] }
 git2 = { version = "0.21", default-features = false }
 ratatui = "0.30"
 regex = "1"
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+] }
 thiserror = "2"
+tokio = { version = "1", features = ["rt"] }
 tui-input = "0.15"
 
 [dev-dependencies]

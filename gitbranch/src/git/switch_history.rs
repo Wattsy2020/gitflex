@@ -1,8 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
-use super::history::{History, HistoryStore};
-
-const HISTORY_FILE_NAME: &str = "gitbranch-switches";
+use super::history::{self, Result};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SwitchHistory {
@@ -22,151 +20,131 @@ impl SwitchHistory {
                 .into_iter()
                 .rev()
                 .enumerate()
-                .map(|(rank, branch)| (branch, rank))
+                .map(|(rank, branch)| (branch, rank + 1))
                 .collect(),
         }
     }
 }
 
-impl History for SwitchHistory {
-    const FILE_NAME: &'static str = HISTORY_FILE_NAME;
-    type Record = String;
-    type ParseError = InvalidRecord;
+pub(super) fn read(database_path: &Path) -> Result<SwitchHistory> {
+    history::with_connection(database_path, |connection| {
+        Box::pin(async move {
+            let rankings =
+                sqlx::query_as::<_, (String, i64)>("SELECT branch, rank FROM switch_history")
+                    .fetch_all(connection)
+                    .await?
+                    .into_iter()
+                    .map(|(branch, rank)| Ok((branch, history::rank_from_database(rank)?)))
+                    .collect::<Result<_>>()?;
 
-    fn parse(contents: &str) -> Result<Self, Self::ParseError> {
-        let rankings = contents.lines().enumerate().try_fold(
-            HashMap::new(),
-            |mut rankings, (index, line)| {
-                let line_number = index + 1;
-                let (branch, rank) = line
-                    .split_once('\t')
-                    .filter(|(branch, rank)| !branch.is_empty() && !rank.contains('\t'))
-                    .ok_or(InvalidRecord { line_number })?;
-                let rank = rank
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|rank| *rank < usize::MAX)
-                    .ok_or(InvalidRecord { line_number })?;
-
-                match rankings.insert(branch.to_owned(), rank) {
-                    Some(_) => Err(InvalidRecord { line_number }),
-                    None => Ok(rankings),
-                }
-            },
-        )?;
-
-        Ok(Self { rankings })
-    }
-
-    fn record(mut self, branch: Self::Record) -> String {
-        let next_rank = self.rankings.values().max().map_or(0, |rank| rank + 1);
-        self.rankings.insert(branch, next_rank);
-
-        let mut rankings = self.rankings.into_iter().collect::<Vec<_>>();
-        rankings.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-        rankings
-            .into_iter()
-            .map(|(branch, rank)| format!("{branch}\t{rank}\n"))
-            .collect()
-    }
+            Ok(SwitchHistory { rankings })
+        })
+    })
 }
 
-pub(super) type SwitchHistoryStore = HistoryStore<SwitchHistory>;
-
-#[derive(Debug, Eq, PartialEq)]
-pub(super) struct InvalidRecord {
-    line_number: usize,
+pub(super) fn write(database_path: &Path, branch: String) -> Result<()> {
+    history::with_connection(database_path, |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                r#"
+INSERT INTO switch_history (branch)
+VALUES (?)
+ON CONFLICT (branch) DO UPDATE SET rank = excluded.rank
+"#,
+            )
+            .bind(branch)
+            .execute(connection)
+            .await?;
+            Ok(())
+        })
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        sync::{Arc, Barrier},
+    };
 
     use tempfile::TempDir;
 
-    use super::{HISTORY_FILE_NAME, History, InvalidRecord, SwitchHistory, SwitchHistoryStore};
-
-    #[test]
-    fn parses_history_into_branch_rankings() {
-        let history =
-            SwitchHistory::parse("feature-b\t4\nfeature-a\t2\n").expect("history should parse");
-
-        assert_eq!(history.rank("feature-b"), Some(4));
-        assert_eq!(history.rank("feature-a"), Some(2));
-        assert_eq!(history.rank("unknown"), None);
-    }
-
-    #[test]
-    fn rejects_empty_and_duplicate_records() {
-        assert_eq!(
-            SwitchHistory::parse("\t0\n").expect_err("empty branch should be rejected"),
-            InvalidRecord { line_number: 1 }
-        );
-        assert_eq!(
-            SwitchHistory::parse("feature\t1\nfeature\t2\n")
-                .expect_err("duplicate branch should be rejected"),
-            InvalidRecord { line_number: 2 }
-        );
-        assert_eq!(
-            SwitchHistory::parse("feature\n").expect_err("missing rank should be rejected"),
-            InvalidRecord { line_number: 1 }
-        );
-        assert_eq!(
-            SwitchHistory::parse("feature\trecent\n")
-                .expect_err("non-numeric rank should be rejected"),
-            InvalidRecord { line_number: 1 }
-        );
-        assert_eq!(
-            SwitchHistory::parse(&format!("feature\t{}\n", usize::MAX))
-                .expect_err("maximum rank should be rejected"),
-            InvalidRecord { line_number: 1 }
-        );
-    }
-
-    #[test]
-    fn recording_assigns_the_next_rank_and_serializes_by_branch_name() {
-        let history =
-            SwitchHistory::parse("feature-b\t5\nfeature-a\t2\n").expect("history should parse");
-        assert_eq!(
-            history.record("feature-a".to_owned()),
-            "feature-a\t6\nfeature-b\t5\n"
-        );
-
-        let history =
-            SwitchHistory::parse("feature-b\t5\nfeature-a\t2\n").expect("history should parse");
-        assert_eq!(
-            history.record("feature-c".to_owned()),
-            "feature-a\t2\nfeature-b\t5\nfeature-c\t6\n"
-        );
-    }
+    use super::{SwitchHistory, read, write};
+    use crate::git::history::database_path;
 
     #[test]
     fn missing_history_is_empty_and_repeated_branches_receive_the_next_rank() {
         let directory = TempDir::new().expect("temporary directory should be created");
-        let store = SwitchHistoryStore::new(directory.path());
+        let database_path = database_path(directory.path());
 
         assert_eq!(
-            store.load().expect("missing history should be readable"),
+            read(&database_path).expect("missing history should be readable"),
             SwitchHistory::default()
         );
 
-        store
-            .record("feature".to_owned())
-            .expect("first switch should be recorded");
-        store
-            .record("review".to_owned())
-            .expect("second switch should be recorded");
-        store
-            .record("feature".to_owned())
-            .expect("repeated switch should be recorded");
+        write(&database_path, "feature".to_owned()).expect("first switch should be recorded");
+        write(&database_path, "review".to_owned()).expect("second switch should be recorded");
+        write(&database_path, "feature".to_owned()).expect("repeated switch should be recorded");
 
-        let history = store.load().expect("history should be readable");
-        assert_eq!(history.rank("feature"), Some(2));
-        assert_eq!(history.rank("review"), Some(1));
+        let history = read(&database_path).expect("history should be readable");
+        assert_eq!(history.rank("feature"), Some(3));
+        assert_eq!(history.rank("review"), Some(2));
+        assert!(database_path.exists());
+        assert!(!directory.path().join("gitbranch-switches").exists());
+        assert!(!directory.path().join("gitbranch-switches.lock").exists());
+    }
+
+    #[test]
+    fn legacy_history_is_ignored_and_left_untouched() {
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let legacy_path = directory.path().join("gitbranch-switches");
+        fs::write(&legacy_path, "feature\t99\n").expect("legacy history should be written");
+
         assert_eq!(
-            fs::read_to_string(directory.path().join(HISTORY_FILE_NAME))
-                .expect("history file should be readable"),
-            "feature\t2\nreview\t1\n"
+            read(&database_path(directory.path())).expect("history should be readable"),
+            SwitchHistory::default()
         );
+        assert_eq!(
+            fs::read_to_string(legacy_path).expect("legacy history should remain readable"),
+            "feature\t99\n"
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_preserve_every_branch() {
+        const WRITER_COUNT: usize = 8;
+
+        let directory = TempDir::new().expect("temporary directory should be created");
+        let database_path = Arc::new(database_path(directory.path()));
+        read(&database_path).expect("database schema should be created");
+        let barrier = Arc::new(Barrier::new(WRITER_COUNT));
+        let writers = (0..WRITER_COUNT)
+            .map(|index| {
+                let database_path = Arc::clone(&database_path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write(&database_path, format!("branch-{index}"))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for writer in writers {
+            writer
+                .join()
+                .expect("history writer should not panic")
+                .expect("history writer should succeed");
+        }
+
+        let history = read(&database_path).expect("history should be readable");
+        let mut ranks = (0..WRITER_COUNT)
+            .map(|index| {
+                history
+                    .rank(&format!("branch-{index}"))
+                    .expect("concurrent branch should be recorded")
+            })
+            .collect::<Vec<_>>();
+        ranks.sort_unstable();
+        assert_eq!(ranks, (1..=WRITER_COUNT).collect::<Vec<_>>());
     }
 }

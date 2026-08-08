@@ -9,7 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use gitbranch::git::{Checkout, ConflictableCommandOutcome, Error, LocalBranch, Repository};
+use gitbranch::git::{
+    Checkout, ConflictableCommandOutcome, Error, HeadOperationRepository, LocalBranch, Repository,
+};
 use tempfile::TempDir;
 
 struct TestRepository {
@@ -156,6 +158,12 @@ impl TestRepository {
 
     fn discover(&self) -> Repository {
         Repository::discover(&self.path).expect("repository should be discovered")
+    }
+
+    fn head_operation(&self) -> HeadOperationRepository {
+        self.discover()
+            .into_head_operation()
+            .expect("repository should allow HEAD operations")
     }
 
     fn worktree_path(&self) -> PathBuf {
@@ -341,9 +349,11 @@ fn switches_to_branch_created_by_git_cli() {
             .is_empty()
     );
     assert_eq!(
-        fs::read_to_string(test_repository.path.join(".git/gitbranch-switches"))
-            .expect("switch history should be readable"),
-        "feature\t0\n"
+        repository
+            .switch_history()
+            .expect("switch history should be readable")
+            .rank("feature"),
+        Some(1)
     );
 }
 
@@ -364,10 +374,13 @@ fn command_line_branch_switches_without_opening_the_ui_and_records_history() {
         test_repository.git_stdout(&["branch", "--show-current"]),
         "feature"
     );
+    let repository = test_repository.head_operation();
     assert_eq!(
-        fs::read_to_string(test_repository.path.join(".git/gitbranch-switches"))
-            .expect("switch history should be readable"),
-        "feature\t0\n"
+        repository
+            .switch_history()
+            .expect("switch history should be readable")
+            .rank("feature"),
+        Some(1)
     );
 }
 
@@ -487,9 +500,11 @@ fn merges_diverged_branch_into_state_validated_by_git_cli() {
             .is_empty()
     );
     assert_eq!(
-        fs::read_to_string(test_repository.path.join(".git/gitbranch-merges"))
-            .expect("merge history should be readable"),
-        "main\tfeature\t0\n"
+        repository
+            .merge_history()
+            .expect("merge history should be readable")
+            .rank("main", "feature"),
+        Some(1)
     );
 }
 
@@ -514,10 +529,13 @@ fn command_line_branch_merges_without_opening_the_ui_and_records_history() {
         &["merge-base", "--is-ancestor", "feature", "main"],
         &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
     );
+    let repository = test_repository.head_operation();
     assert_eq!(
-        fs::read_to_string(test_repository.path.join(".git/gitbranch-merges"))
-            .expect("merge history should be readable"),
-        "main\tfeature\t0\n"
+        repository
+            .merge_history()
+            .expect("merge history should be readable")
+            .rank("main", "feature"),
+        Some(1)
     );
 }
 
@@ -538,7 +556,14 @@ fn invalid_exact_command_line_branch_uses_existing_validation() {
         test_repository.git_stdout(&["rev-parse", "HEAD"]),
         original_tip
     );
-    assert!(!test_repository.path.join(".git/gitbranch-merges").exists());
+    let repository = test_repository.head_operation();
+    assert_eq!(
+        repository
+            .merge_history()
+            .expect("merge history should be readable")
+            .rank("main", "main"),
+        None
+    );
 }
 
 #[test]
@@ -760,10 +785,16 @@ fn command_line_branch_rebases_without_opening_the_ui_and_records_history() {
         &["merge-base", "--is-ancestor", "feature", "main"],
         &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
     );
+    let repository = test_repository
+        .head_operation()
+        .into_clean_rebase()
+        .expect("repository should allow rebase");
     assert_eq!(
-        fs::read_to_string(test_repository.path.join(".git/gitbranch-rebases"))
-            .expect("rebase history should be readable"),
-        "main\tfeature\n"
+        repository
+            .last_rebase_target()
+            .expect("rebase history should be readable")
+            .as_deref(),
+        Some("feature")
     );
 }
 
