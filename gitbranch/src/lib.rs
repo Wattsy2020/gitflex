@@ -38,3 +38,11 @@ pub fn run_rebase(repository: &CleanRebaseRepository, branch: Option<&str>) -> R
 pub fn run_merge(repository: &HeadOperationRepository, branch: Option<&str>) -> Result<(), Error> {
     merge::run(repository, branch)
 }
+
+/// Map git branches to their names
+fn local_branch_names(branches: &[git::LocalBranch]) -> Vec<String> {
+    branches
+        .iter()
+        .map(|branch| branch.name().to_owned())
+        .collect()
+}

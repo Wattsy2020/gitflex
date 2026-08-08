@@ -2,6 +2,7 @@ use crate::{
     Error,
     git::{self, CleanRebaseRepository, ConflictableCommandOutcome},
     history::HistoryStore,
+    local_branch_names,
     ui::{
         self,
         Selection::{Cancelled, Selected, Unavailable},
@@ -20,10 +21,12 @@ pub fn run(repository: &CleanRebaseRepository, branch: Option<&str>) -> Result<(
     let last_target = history_store
         .last_rebase_target(&current_branch)
         .unwrap_or_default();
-    let branches = repository.local_branches()?;
 
-    match ui::run_rebase_app(branches, last_target, branch, |existing_branches| {
-        history_store.prune_rebase_in_background(existing_branches);
+    let branches = repository.local_branches()?;
+    let branch_names = local_branch_names(&branches);
+
+    match ui::run_rebase_app(branches, last_target, branch, || {
+        history_store.prune_rebase_in_background(branch_names)
     })? {
         Unavailable => println!("No branches available to rebase onto."),
         Cancelled => println!("Cancelled."),

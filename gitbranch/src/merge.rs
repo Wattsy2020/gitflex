@@ -2,6 +2,7 @@ use crate::{
     Error,
     git::{self, ConflictableCommandOutcome, HeadOperationRepository},
     history::HistoryStore,
+    local_branch_names,
     ui::{
         self,
         Selection::{Cancelled, Selected, Unavailable},
@@ -16,15 +17,13 @@ pub fn run(repository: &HeadOperationRepository, branch: Option<&str>) -> Result
     let history_store = HistoryStore::new(repository.common_directory());
     // History is only a ranking cache; failing to read it must not block merging.
     let history = history_store.read_merge().unwrap_or_default();
-    let branches = repository.local_branches()?;
 
-    match ui::run_merge_app(
-        branches,
-        &current_branch,
-        history,
-        branch,
-        |existing_branches| history_store.prune_merge_in_background(existing_branches),
-    )? {
+    let branches = repository.local_branches()?;
+    let branch_names = local_branch_names(&branches);
+
+    match ui::run_merge_app(branches, &current_branch, history, branch, || {
+        history_store.prune_merge_in_background(branch_names)
+    })? {
         Unavailable => println!("No branches available to merge."),
         Cancelled => println!("Cancelled."),
         Selected(branch) => {
