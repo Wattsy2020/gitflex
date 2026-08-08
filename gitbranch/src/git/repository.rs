@@ -412,6 +412,22 @@ impl HeadOperationRepository {
         switch_history::read(&self.repository.history_database).map_err(Error::from)
     }
 
+    pub(crate) fn prune_switch_history_in_background(&self, existing_branches: Vec<String>) {
+        history::prune_in_background(
+            &self.repository.history_database,
+            existing_branches,
+            switch_history::prune,
+        );
+    }
+
+    pub(crate) fn prune_merge_history_in_background(&self, existing_branches: Vec<String>) {
+        history::prune_in_background(
+            &self.repository.history_database,
+            existing_branches,
+            merge_history::prune,
+        );
+    }
+
     pub fn into_clean_rebase(self) -> Result<CleanRebaseRepository, Error> {
         if has_tracked_changes(&self.repository.inner)? {
             return Err(Error::TrackedChangesForRebase);
@@ -473,6 +489,14 @@ impl CleanRebaseRepository {
         Ok(rebase_history::read(&self.repository.history_database)?
             .target_for(&current_branch)
             .map(str::to_owned))
+    }
+
+    pub(crate) fn prune_rebase_history_in_background(&self, existing_branches: Vec<String>) {
+        history::prune_in_background(
+            &self.repository.history_database,
+            existing_branches,
+            rebase_history::prune,
+        );
     }
 
     pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {

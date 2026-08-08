@@ -16,7 +16,13 @@ pub fn run(repository: &HeadOperationRepository, branch: Option<&str>) -> Result
     let history = repository.merge_history().unwrap_or_default();
     let branches = repository.local_branches()?;
 
-    match ui::run_merge_app(branches, &current_branch, history, branch)? {
+    match ui::run_merge_app(
+        branches,
+        &current_branch,
+        history,
+        branch,
+        |existing_branches| repository.prune_merge_history_in_background(existing_branches),
+    )? {
         Unavailable => println!("No branches available to merge."),
         Cancelled => println!("Cancelled."),
         Selected(branch) => match repository.merge_from(&branch)? {

@@ -3,10 +3,14 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
+    thread,
     time::Duration,
 };
 
-use sqlx::{ConnectOptions, Connection, Executor, SqliteConnection, sqlite::SqliteConnectOptions};
+use sqlx::{
+    ConnectOptions, Connection, Executor, QueryBuilder, Sqlite, SqliteConnection,
+    sqlite::SqliteConnectOptions,
+};
 use thiserror::Error;
 
 pub(super) const DATABASE_FILE_NAME: &str = "gitbranch-history.sqlite3";
@@ -31,6 +35,7 @@ CREATE TABLE IF NOT EXISTS rebase_history (
 "#;
 
 type ConnectionFuture<'connection, T> = Pin<Box<dyn Future<Output = Result<T>> + 'connection>>;
+type PruneOperation = fn(&Path, Vec<String>) -> Result<()>;
 
 pub(super) type Result<T> = std::result::Result<T, Error>;
 
@@ -46,6 +51,72 @@ pub enum Error {
 
 pub(super) fn database_path(common_directory: &Path) -> PathBuf {
     common_directory.join(DATABASE_FILE_NAME)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Table {
+    Switch,
+    Merge,
+    Rebase,
+}
+
+impl Table {
+    fn delete_all(self) -> &'static str {
+        match self {
+            Self::Switch => "DELETE FROM switch_history",
+            Self::Merge => "DELETE FROM merge_history",
+            Self::Rebase => "DELETE FROM rebase_history",
+        }
+    }
+
+    fn delete_missing(self) -> &'static str {
+        match self {
+            Self::Switch => {
+                "DELETE FROM switch_history WHERE branch NOT IN (SELECT branch FROM existing_branches)"
+            }
+            Self::Merge => {
+                "DELETE FROM merge_history WHERE destination NOT IN (SELECT branch FROM existing_branches) OR source NOT IN (SELECT branch FROM existing_branches)"
+            }
+            Self::Rebase => {
+                "DELETE FROM rebase_history WHERE source NOT IN (SELECT branch FROM existing_branches) OR target NOT IN (SELECT branch FROM existing_branches)"
+            }
+        }
+    }
+}
+
+pub(super) fn prune(
+    database_path: &Path,
+    existing_branches: Vec<String>,
+    table: Table,
+) -> Result<()> {
+    with_connection(database_path, |connection| {
+        Box::pin(async move {
+            if existing_branches.is_empty() {
+                connection.execute(table.delete_all()).await?;
+            } else {
+                let mut query = QueryBuilder::<Sqlite>::new("WITH existing_branches(branch) AS (");
+                query.push_values(existing_branches, |mut row, branch| {
+                    row.push_bind(branch);
+                });
+                query.push(") ").push(table.delete_missing());
+                query.build().execute(connection).await?;
+            }
+            Ok(())
+        })
+    })
+}
+
+pub(super) fn prune_in_background(
+    database_path: &Path,
+    existing_branches: Vec<String>,
+    operation: PruneOperation,
+) {
+    let database_path = database_path.to_owned();
+    let _ = thread::Builder::new()
+        .name("gitbranch-history-prune".to_owned())
+        .spawn(move || {
+            let _ = operation(&database_path, existing_branches);
+        });
 }
 
 pub(super) fn with_connection<T>(

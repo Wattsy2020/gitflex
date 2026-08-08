@@ -385,6 +385,51 @@ fn command_line_branch_switches_without_opening_the_ui_and_records_history() {
 }
 
 #[test]
+fn exact_command_line_branch_does_not_start_history_pruning() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("deleted");
+    test_repository.create_branch("feature");
+    let repository = test_repository.discover();
+    let deleted = branch(&repository, "deleted");
+    let repository = repository
+        .into_head_operation()
+        .expect("repository should allow HEAD operations");
+    repository
+        .switch_to(&deleted)
+        .expect("deleted branch should be switched to");
+    let main = repository
+        .local_branches()
+        .expect("branches should be listed")
+        .into_iter()
+        .find(|branch| branch.name() == "main")
+        .expect("main branch should exist");
+    repository
+        .switch_to(&main)
+        .expect("main branch should be restored");
+    assert_eq!(
+        repository
+            .switch_history()
+            .expect("switch history should be readable")
+            .rank("deleted"),
+        Some(1)
+    );
+    drop(repository);
+    test_repository.git_success(&["branch", "-D", "--", "deleted"]);
+
+    let output = test_repository.gitbranch(&["switch", "feature"]);
+
+    assert_gitbranch_success(&["switch", "feature"], &output);
+    assert_eq!(
+        test_repository
+            .head_operation()
+            .switch_history()
+            .expect("switch history should be readable")
+            .rank("deleted"),
+        Some(1)
+    );
+}
+
+#[test]
 fn switches_with_compatible_unstaged_tracked_changes() {
     let test_repository = TestRepository::new();
     test_repository.commit_file("local.txt", "base\n", "Add local file");
