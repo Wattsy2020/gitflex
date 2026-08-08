@@ -15,6 +15,11 @@ struct Cli {
 enum Command {
     /// Select and delete local branches
     Clean,
+    /// Select a local branch to delete
+    Delete {
+        /// Branch name, or initial search text when it is not an exact match
+        branch: Option<String>,
+    },
     /// Select a local branch to switch to
     Switch {
         /// Branch name, or initial search text when it is not an exact match
@@ -38,6 +43,7 @@ fn run() -> Result<(), gitbranch::Error> {
 
     match command {
         Command::Clean => gitbranch::run_clean(&repository)?,
+        Command::Delete { branch } => gitbranch::run_delete(&repository, branch.as_deref())?,
         Command::Switch { branch } => {
             gitbranch::run_switch(&repository.into_head_operation()?, branch.as_deref())?
         }
@@ -76,6 +82,7 @@ mod tests {
     #[test]
     fn single_operations_accept_an_optional_branch_argument() {
         for (operation, expected_branch) in [
+            ("delete", "feature/delete"),
             ("switch", "feature/switch"),
             ("rebase", "feature/rebase"),
             ("merge", "feature/merge"),
@@ -84,7 +91,8 @@ mod tests {
                 .expect("a branch argument should be accepted")
                 .command;
             let branch = match command {
-                Command::Switch { branch }
+                Command::Delete { branch }
+                | Command::Switch { branch }
                 | Command::Rebase { branch }
                 | Command::Merge { branch } => branch,
                 Command::Clean => panic!("a single operation should be parsed"),
@@ -96,12 +104,13 @@ mod tests {
 
     #[test]
     fn single_operations_remain_interactive_without_an_argument() {
-        for operation in ["switch", "rebase", "merge"] {
+        for operation in ["delete", "switch", "rebase", "merge"] {
             let command = Cli::try_parse_from(["gitbranch", operation])
                 .expect("the branch argument should remain optional")
                 .command;
             let branch = match command {
-                Command::Switch { branch }
+                Command::Delete { branch }
+                | Command::Switch { branch }
                 | Command::Rebase { branch }
                 | Command::Merge { branch } => branch,
                 Command::Clean => panic!("a single operation should be parsed"),

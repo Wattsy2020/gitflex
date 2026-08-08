@@ -50,6 +50,13 @@ pub fn run_clean_app(branches: Vec<CleanBranch>) -> io::Result<Selection<Vec<Loc
     run_app(AppImpl::clean(branches))
 }
 
+pub fn run_delete_app(
+    branches: Vec<LocalBranch>,
+    branch: Option<&str>,
+) -> io::Result<Selection<LocalBranch>> {
+    run_single_app(branches, branch, AppImpl::delete)
+}
+
 pub fn run_merge_app(
     branches: Vec<LocalBranch>,
     destination: &str,

@@ -49,6 +49,7 @@ pub enum Transition<T> {
 /// Define modes: the type of operation an app can do
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SingleOperation {
+    Delete,
     Switch,
     Rebase { last_target: Option<String> },
     Merge,
@@ -110,6 +111,7 @@ impl Mode for CleanMode {
 impl SingleMode {
     fn is_selectable(&self, branch: &LocalBranch) -> bool {
         match &self.operation {
+            SingleOperation::Delete => branch.is_deletable(),
             SingleOperation::Switch => branch.is_switchable(),
             SingleOperation::Rebase { .. } => branch.is_rebase_target(),
             SingleOperation::Merge => branch.is_merge_source(),
@@ -146,6 +148,9 @@ impl Mode for SingleMode {
 
     fn help(&self) -> &'static str {
         match &self.operation {
+            SingleOperation::Delete => {
+                "type search   ↑/↓ navigate   enter delete branch   esc quit"
+            }
             SingleOperation::Switch => {
                 "type search   ↑/↓ navigate   enter switch to branch   esc quit"
             }
@@ -288,6 +293,18 @@ impl AppImpl<CleanMode> {
 }
 
 impl AppImpl<SingleMode> {
+    pub fn delete(mut branches: Vec<LocalBranch>, initial_search: Option<String>) -> Option<Self> {
+        branches.sort_unstable_by(|left, right| left.name().cmp(right.name()));
+
+        Self::new(
+            branches,
+            SingleMode {
+                operation: SingleOperation::Delete,
+            },
+            initial_search,
+        )
+    }
+
     pub fn switch(
         mut branches: Vec<LocalBranch>,
         history: &SwitchHistory,
@@ -730,6 +747,12 @@ mod tests {
             ["develop", "release", "feature", "main"]
         );
 
+        let delete = AppImpl::delete(branches(), None).unwrap();
+        assert_eq!(
+            branch_names(&delete),
+            ["develop", "release", "feature", "main"]
+        );
+
         let switch = AppImpl::switch(branches(), &SwitchHistory::default(), None).unwrap();
         assert_eq!(
             branch_names(&switch),
@@ -747,6 +770,32 @@ mod tests {
             branch_names(&merge),
             ["develop", "feature", "release", "main"]
         );
+    }
+
+    #[test]
+    fn delete_orders_branches_by_name_and_selects_a_matching_deletable_branch() {
+        let mut app = AppImpl::delete(
+            vec![
+                branch("zeta", Checkout::Available),
+                branch("feature-review", Checkout::OtherWorktree),
+                branch("main", Checkout::CurrentWorktree),
+                branch("feature", Checkout::Available),
+                branch("alpha", Checkout::Available),
+            ],
+            Some("feature".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            branch_names(&app),
+            ["feature", "feature-review", "alpha", "zeta", "main"]
+        );
+        assert_eq!(highlighted_branch_name(&app), "feature");
+
+        let Transition::Complete(branch) = app.update(Action::Confirm(Confirmation::Plain)) else {
+            panic!("the matching deletable branch should be selected");
+        };
+        assert_eq!(branch.name(), "feature");
     }
 
     #[test]

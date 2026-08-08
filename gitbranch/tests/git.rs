@@ -213,6 +213,24 @@ fn deletes_branch_created_by_git_cli() {
 }
 
 #[test]
+fn command_line_branch_deletes_without_opening_the_ui() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+
+    let output = test_repository.gitbranch(&["delete", "feature"]);
+
+    assert_gitbranch_success(&["delete", "feature"], &output);
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "Deleted branch feature.\n"
+    );
+    assert!(output.stderr.is_empty());
+    let branch_output =
+        test_repository.git(&["show-ref", "--verify", "--quiet", "refs/heads/feature"]);
+    assert_eq!(branch_output.status.code(), Some(1));
+}
+
+#[test]
 fn describes_clean_branches_created_by_git_cli() {
     let test_repository = TestRepository::new();
     test_repository.create_branch("merged");

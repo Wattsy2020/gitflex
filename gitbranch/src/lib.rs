@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 mod clean;
+mod delete;
 pub mod git;
 mod merge;
 mod rebase;
@@ -19,6 +20,10 @@ pub enum Error {
 
 pub fn run_clean(repository: &Repository) -> Result<(), Error> {
     clean::run(repository)
+}
+
+pub fn run_delete(repository: &Repository, branch: Option<&str>) -> Result<(), Error> {
+    delete::run(repository, branch)
 }
 
 pub fn run_switch(repository: &HeadOperationRepository, branch: Option<&str>) -> Result<(), Error> {
