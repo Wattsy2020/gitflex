@@ -13,7 +13,14 @@ use sqlx::{
 };
 use thiserror::Error;
 
-pub(super) const DATABASE_FILE_NAME: &str = "gitbranch-history.sqlite3";
+mod merge;
+mod rebase;
+mod switch;
+
+pub use merge::MergeHistory;
+pub use switch::SwitchHistory;
+
+pub const DATABASE_FILE_NAME: &str = "gitbranch-history.sqlite3";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS switch_history (
@@ -37,7 +44,7 @@ CREATE TABLE IF NOT EXISTS rebase_history (
 type ConnectionFuture<'connection, T> = Pin<Box<dyn Future<Output = Result<T>> + 'connection>>;
 type PruneOperation = fn(&Path, Vec<String>) -> Result<()>;
 
-pub(super) type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -47,6 +54,71 @@ pub enum Error {
     Runtime(#[from] std::io::Error),
     #[error("history database contains invalid rank {0}")]
     InvalidRank(i64),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryStore {
+    database_path: PathBuf,
+}
+
+impl HistoryStore {
+    pub fn new(common_directory: impl AsRef<Path>) -> Self {
+        Self {
+            database_path: database_path(common_directory.as_ref()),
+        }
+    }
+
+    pub fn read_switch(&self) -> Result<SwitchHistory> {
+        switch::read(&self.database_path)
+    }
+
+    pub fn read_merge(&self) -> Result<MergeHistory> {
+        merge::read(&self.database_path)
+    }
+
+    pub fn last_rebase_target(&self, source: &str) -> Result<Option<String>> {
+        Ok(rebase::read(&self.database_path)?
+            .target_for(source)
+            .map(str::to_owned))
+    }
+
+    pub fn record_switch(&self, branch: impl Into<String>) -> Result<()> {
+        switch::write(&self.database_path, branch.into())
+    }
+
+    pub fn record_merge(
+        &self,
+        destination: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Result<()> {
+        merge::write(
+            &self.database_path,
+            merge::MergeRecord::new(destination, source),
+        )
+    }
+
+    pub fn record_rebase(
+        &self,
+        source: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Result<()> {
+        rebase::write(
+            &self.database_path,
+            rebase::RebaseRecord::new(source, target),
+        )
+    }
+
+    pub fn prune_switch_in_background(&self, existing_branches: Vec<String>) {
+        prune_in_background(&self.database_path, existing_branches, switch::prune);
+    }
+
+    pub fn prune_merge_in_background(&self, existing_branches: Vec<String>) {
+        prune_in_background(&self.database_path, existing_branches, merge::prune);
+    }
+
+    pub fn prune_rebase_in_background(&self, existing_branches: Vec<String>) {
+        prune_in_background(&self.database_path, existing_branches, rebase::prune);
+    }
 }
 
 pub(super) fn database_path(common_directory: &Path) -> PathBuf {

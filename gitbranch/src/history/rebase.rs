@@ -1,15 +1,15 @@
 use std::{collections::BTreeMap, path::Path};
 
-use super::history::{self, Result};
+use super::{self as history, Result};
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct RebaseRecord {
+pub(super) struct RebaseRecord {
     source: String,
     target: String,
 }
 
 impl RebaseRecord {
-    pub fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
+    pub(super) fn new(source: impl Into<String>, target: impl Into<String>) -> Self {
         Self {
             source: source.into(),
             target: target.into(),
@@ -70,10 +70,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{RebaseHistory, RebaseRecord, prune, read, write};
-    use crate::git::{
-        history::database_path,
-        merge_history::{self, MergeRecord},
-        switch_history,
+    use crate::history::{
+        database_path,
+        merge::{self, MergeRecord},
+        switch,
     };
 
     #[test]
@@ -108,9 +108,8 @@ mod tests {
             .expect("stale source should be recorded");
         write(&database_path, RebaseRecord::new("other", "deleted"))
             .expect("stale target should be recorded");
-        switch_history::write(&database_path, "deleted".to_owned())
-            .expect("switch should be recorded");
-        merge_history::write(&database_path, MergeRecord::new("main", "deleted"))
+        switch::write(&database_path, "deleted".to_owned()).expect("switch should be recorded");
+        merge::write(&database_path, MergeRecord::new("main", "deleted"))
             .expect("merge should be recorded");
 
         prune(
@@ -124,13 +123,13 @@ mod tests {
         assert_eq!(rebase_history.target_for("deleted"), None);
         assert_eq!(rebase_history.target_for("other"), None);
         assert_eq!(
-            switch_history::read(&database_path)
+            switch::read(&database_path)
                 .expect("switch history should be readable")
                 .rank("deleted"),
             Some(1)
         );
         assert_eq!(
-            merge_history::read(&database_path)
+            merge::read(&database_path)
                 .expect("merge history should be readable")
                 .rank("main", "deleted"),
             Some(1)

@@ -1,7 +1,8 @@
 use std::io;
 
 use crate::{
-    git::{CleanBranch, LocalBranch, MergeHistory, SwitchHistory},
+    git::{CleanBranch, LocalBranch},
+    history::{MergeHistory, SwitchHistory},
     ui::{
         Selection::{Cancelled, Selected, Unavailable},
         app::{App, AppImpl},
@@ -148,8 +149,11 @@ mod tests {
     use std::cell::Cell;
 
     use super::{Selection, run_app_with, run_switch_app};
-    use crate::git::{Checkout, LocalBranch, SwitchHistory};
     use crate::ui::app::AppImpl;
+    use crate::{
+        git::{Checkout, LocalBranch},
+        history::SwitchHistory,
+    };
 
     fn branch(name: &str, checkout: Checkout) -> LocalBranch {
         LocalBranch::for_test(name, checkout)

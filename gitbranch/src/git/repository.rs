@@ -14,11 +14,6 @@ use thiserror::Error;
 
 use crate::git::Error::DeletedWorktree;
 
-use super::history;
-use super::merge_history::{self, MergeHistory, MergeRecord};
-use super::rebase_history::{self, RebaseRecord};
-use super::switch_history::{self, SwitchHistory};
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Checkout {
     Available,
@@ -182,7 +177,6 @@ impl fmt::Display for InProgressOperation {
 pub struct Repository {
     inner: git2::Repository,
     worktree: PathBuf,
-    history_database: PathBuf,
 }
 
 pub struct HeadOperationRepository {
@@ -199,11 +193,9 @@ impl Repository {
             .workdir()
             .expect("repository should have been validated as non-bare")
             .to_owned();
-        let history_database = history::database_path(repository.commondir());
         Repository {
             inner: repository,
             worktree,
-            history_database,
         }
     }
 
@@ -213,6 +205,10 @@ impl Repository {
             return Err(Error::BareRepository);
         }
         Ok(Repository::new(repository))
+    }
+
+    pub(crate) fn common_directory(&self) -> &Path {
+        self.inner.commondir()
     }
 
     pub fn into_head_operation(self) -> Result<HeadOperationRepository, Error> {
@@ -396,36 +392,16 @@ impl Repository {
 }
 
 impl HeadOperationRepository {
+    pub(crate) fn common_directory(&self) -> &Path {
+        self.repository.common_directory()
+    }
+
     pub fn local_branches(&self) -> Result<Vec<LocalBranch>, Error> {
         self.repository.local_branches()
     }
 
     pub fn current_branch(&self) -> Result<Option<String>, Error> {
         self.repository.current_branch()
-    }
-
-    pub fn merge_history(&self) -> Result<MergeHistory, Error> {
-        merge_history::read(&self.repository.history_database).map_err(Error::from)
-    }
-
-    pub fn switch_history(&self) -> Result<SwitchHistory, Error> {
-        switch_history::read(&self.repository.history_database).map_err(Error::from)
-    }
-
-    pub(crate) fn prune_switch_history_in_background(&self, existing_branches: Vec<String>) {
-        history::prune_in_background(
-            &self.repository.history_database,
-            existing_branches,
-            switch_history::prune,
-        );
-    }
-
-    pub(crate) fn prune_merge_history_in_background(&self, existing_branches: Vec<String>) {
-        history::prune_in_background(
-            &self.repository.history_database,
-            existing_branches,
-            merge_history::prune,
-        );
     }
 
     pub fn into_clean_rebase(self) -> Result<CleanRebaseRepository, Error> {
@@ -438,7 +414,6 @@ impl HeadOperationRepository {
     }
 
     pub fn switch_to(&self, branch: &LocalBranch) -> Result<(), Error> {
-        let branch_name = branch.name().to_owned();
         let branch = self.repository.get_non_checkedout_branch(branch)?;
         let reference = branch.get();
         let reference_name = reference.name()?;
@@ -450,9 +425,6 @@ impl HeadOperationRepository {
             .inner
             .checkout_tree(&target, Some(&mut checkout))?;
         self.repository.inner.set_head(reference_name)?;
-
-        // Switching succeeded, so a cache write failure should not fail the user's operation.
-        let _ = switch_history::write(&self.repository.history_database, branch_name);
         Ok(())
     }
 
@@ -464,18 +436,15 @@ impl HeadOperationRepository {
         let outcome = self
             .repository
             .run_git_operation(branch, ["merge", "--no-edit"])?;
-
-        // Merge history is only a ranking cache; its failure must not fail the merge.
-        let _ = merge_history::write(
-            &self.repository.history_database,
-            MergeRecord::new(current_branch, branch.name()),
-        );
-
         Ok(outcome)
     }
 }
 
 impl CleanRebaseRepository {
+    pub(crate) fn common_directory(&self) -> &Path {
+        self.repository.common_directory()
+    }
+
     pub fn local_branches(&self) -> Result<Vec<LocalBranch>, Error> {
         self.repository.local_branches()
     }
@@ -484,35 +453,12 @@ impl CleanRebaseRepository {
         self.repository.current_branch()
     }
 
-    pub fn last_rebase_target(&self) -> Result<Option<String>, Error> {
-        let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
-        Ok(rebase_history::read(&self.repository.history_database)?
-            .target_for(&current_branch)
-            .map(str::to_owned))
-    }
-
-    pub(crate) fn prune_rebase_history_in_background(&self, existing_branches: Vec<String>) {
-        history::prune_in_background(
-            &self.repository.history_database,
-            existing_branches,
-            rebase_history::prune,
-        );
-    }
-
     pub fn rebase_onto(&self, branch: &LocalBranch) -> Result<ConflictableCommandOutcome, Error> {
         let current_branch = self.current_branch()?.ok_or(Error::DetachedHead)?;
         if current_branch == branch.name() {
             return Err(Error::CurrentBranchAsRebaseTarget);
         }
         let outcome = self.repository.run_git_operation(branch, ["rebase"])?;
-
-        // ignore errors if we can't record our rebase history to the database
-        // the user doesn't know or care that we cache things and failed to write to it
-        // they just want to complete their operation
-        let _ = rebase_history::write(
-            &self.repository.history_database,
-            RebaseRecord::new(current_branch, branch.name()),
-        );
         Ok(outcome)
     }
 }
@@ -561,8 +507,6 @@ pub enum Error {
     Git(#[from] git2::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error(transparent)]
-    History(#[from] history::Error),
     #[error("branch name is not valid UTF-8")]
     InvalidBranchName,
     #[error("worktree name is not valid UTF-8")]
@@ -617,7 +561,7 @@ mod tests {
 
     use super::{
         Checkout, CleanBranch, ConflictableCommandOutcome, Error, InProgressOperation, LocalBranch,
-        RebaseRecord, Repository, history, rebase_history,
+        Repository,
     };
 
     fn repository_with_branches() -> (TempDir, GitRepository) {
@@ -762,16 +706,6 @@ mod tests {
         let worktree_directory = TempDir::new().expect("temporary directory should be created");
         add_feature_worktree(&repository, &worktree_directory);
         (directory, worktree_directory, Repository::new(repository))
-    }
-
-    fn assert_historydb_exists(directory: &TempDir) {
-        assert!(
-            directory
-                .path()
-                .join(".git")
-                .join(history::DATABASE_FILE_NAME)
-                .exists()
-        );
     }
 
     fn clean_branch<'a>(branches: &'a [CleanBranch], name: &str) -> &'a CleanBranch {
@@ -1275,8 +1209,8 @@ mod tests {
     }
 
     #[test]
-    fn linked_worktree_records_rebase_history_in_the_common_git_directory() {
-        let (main_directory, worktree_directory, _) = initialise_worktree();
+    fn linked_worktree_rebases_onto_a_branch_from_the_main_worktree() {
+        let (_main_directory, worktree_directory, _) = initialise_worktree();
         let repository = Repository::discover(worktree_directory.path().join("feature"))
             .expect("linked worktree repository should be discovered");
         let main = repository
@@ -1296,25 +1230,11 @@ mod tests {
             .expect("up-to-date rebase should succeed");
 
         assert_eq!(outcome, ConflictableCommandOutcome::Completed);
-        assert_eq!(
-            repository
-                .last_rebase_target()
-                .expect("common rebase history should be readable")
-                .as_deref(),
-            Some("main")
-        );
-        assert_historydb_exists(&main_directory);
-        assert!(
-            !main_directory
-                .path()
-                .join(".git/worktrees/feature-worktree/gitbranch-history.sqlite3")
-                .exists()
-        );
     }
 
     #[test]
-    fn linked_worktree_records_merge_history_in_the_common_git_directory() {
-        let (main_directory, worktree_directory, _) = initialise_worktree();
+    fn linked_worktree_merges_a_branch_from_the_main_worktree() {
+        let (_main_directory, worktree_directory, _) = initialise_worktree();
         let repository = Repository::discover(worktree_directory.path().join("feature"))
             .expect("linked worktree repository should be discovered");
         let main = repository
@@ -1332,20 +1252,6 @@ mod tests {
             .expect("up-to-date merge should succeed");
 
         assert_eq!(outcome, ConflictableCommandOutcome::Completed);
-        assert_eq!(
-            repository
-                .merge_history()
-                .expect("common merge history should be readable")
-                .rank("feature", "main"),
-            Some(1)
-        );
-        assert_historydb_exists(&main_directory);
-        assert!(
-            !main_directory
-                .path()
-                .join(".git/worktrees/feature-worktree/gitbranch-history.sqlite3")
-                .exists()
-        );
     }
 
     #[test]
@@ -1373,43 +1279,11 @@ mod tests {
                 .as_deref(),
             Some("feature")
         );
-        assert_eq!(
-            repository
-                .switch_history()
-                .expect("switch history should be readable")
-                .rank("feature"),
-            Some(1)
-        );
-
-        let main = repository
-            .local_branches()
-            .expect("branches should be listed")
-            .into_iter()
-            .find(|branch| branch.name() == "main")
-            .expect("main branch should exist");
-        repository
-            .switch_to(&main)
-            .expect("main branch should be switched");
-        let feature = repository
-            .local_branches()
-            .expect("branches should be listed")
-            .into_iter()
-            .find(|branch| branch.name() == "feature")
-            .expect("feature branch should exist");
-        repository
-            .switch_to(&feature)
-            .expect("feature branch should be switched again");
-
-        let history = repository
-            .switch_history()
-            .expect("updated switch history should be readable");
-        assert_eq!(history.rank("feature"), Some(3));
-        assert_eq!(history.rank("main"), Some(2));
     }
 
     #[test]
     fn refuses_to_switch_to_branch_in_other_worktree() {
-        let (main_directory, _worktree_directory, repository) = initialise_worktree();
+        let (_main_directory, _worktree_directory, repository) = initialise_worktree();
         let feature = repository
             .local_branches()
             .expect("branches should be listed")
@@ -1425,17 +1299,11 @@ mod tests {
             .expect_err("checked-out branch should not be switched to");
 
         assert!(matches!(error, Error::BranchCheckedOut(name) if name == "feature"));
-        assert!(
-            !main_directory
-                .path()
-                .join(".git/gitbranch-history.sqlite3")
-                .exists()
-        );
     }
 
     #[test]
-    fn linked_worktree_records_switch_history_in_the_common_git_directory() {
-        let (main_directory, repository) = repository_with_branches();
+    fn linked_worktree_switches_to_an_available_branch() {
+        let (_main_directory, repository) = repository_with_branches();
         let head = repository
             .head()
             .expect("HEAD should exist")
@@ -1467,51 +1335,10 @@ mod tests {
 
         assert_eq!(
             repository
-                .switch_history()
-                .expect("common switch history should be readable")
-                .rank("review"),
-            Some(1)
-        );
-        assert_historydb_exists(&main_directory);
-        assert!(
-            !main_directory
-                .path()
-                .join(".git/worktrees/feature-worktree/gitbranch-history.sqlite3")
-                .exists()
-        );
-    }
-
-    #[test]
-    fn switch_succeeds_when_history_database_is_invalid() {
-        let (directory, repository) = repository_with_branches();
-        let database_path = directory.path().join(".git/gitbranch-history.sqlite3");
-        fs::write(&database_path, "invalid database")
-            .expect("invalid history database should be written");
-        let repository = Repository::new(repository);
-        let feature = repository
-            .local_branches()
-            .expect("branches should be listed")
-            .into_iter()
-            .find(|branch| branch.name() == "feature")
-            .expect("feature branch should exist");
-        let repository = repository
-            .into_head_operation()
-            .expect("repository should allow HEAD operations");
-
-        repository
-            .switch_to(&feature)
-            .expect("switch should ignore history write failure");
-
-        assert_eq!(
-            repository
                 .current_branch()
-                .expect("current branch should be read")
+                .expect("current branch should be readable")
                 .as_deref(),
-            Some("feature")
-        );
-        assert_eq!(
-            fs::read_to_string(database_path).expect("invalid database should remain unchanged"),
-            "invalid database"
+            Some("review")
         );
     }
 
@@ -1606,58 +1433,11 @@ mod tests {
                 .expect("merged file should be checked out"),
             "feature\n"
         );
-        assert_eq!(
-            repository
-                .merge_history()
-                .expect("merge history should be readable")
-                .rank("main", "feature"),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn merge_succeeds_when_history_database_is_invalid() {
-        let (directory, repository) = repository_with_branches();
-        let initial = repository
-            .head()
-            .expect("HEAD should exist")
-            .target()
-            .expect("HEAD should have a target");
-        commit_file(
-            &repository,
-            "refs/heads/feature",
-            initial,
-            "feature.txt",
-            "feature\n",
-        );
-        let database_path = directory.path().join(".git/gitbranch-history.sqlite3");
-        fs::write(&database_path, "invalid database")
-            .expect("invalid history database should be written");
-        let repository = Repository::new(repository);
-        let feature = repository
-            .local_branches()
-            .expect("branches should be listed")
-            .into_iter()
-            .find(|branch| branch.name() == "feature")
-            .expect("feature branch should exist");
-        let repository = repository
-            .into_head_operation()
-            .expect("repository should allow HEAD operations");
-
-        let outcome = repository
-            .merge_from(&feature)
-            .expect("merge should ignore history write failure");
-
-        assert_eq!(outcome, ConflictableCommandOutcome::Completed);
-        assert_eq!(
-            fs::read_to_string(database_path).expect("invalid database should remain unchanged"),
-            "invalid database"
-        );
     }
 
     #[test]
     fn refuses_to_merge_current_branch_into_itself() {
-        let (directory, repository) = repository_with_branches();
+        let (_directory, repository) = repository_with_branches();
         let repository = Repository::new(repository);
         let main = repository
             .local_branches()
@@ -1674,17 +1454,11 @@ mod tests {
             .expect_err("current branch should not be merged into itself");
 
         assert!(matches!(error, Error::CurrentBranchAsMergeSource));
-        assert!(
-            !directory
-                .path()
-                .join(".git/gitbranch-history.sqlite3")
-                .exists()
-        );
     }
 
     #[test]
-    fn failed_merge_does_not_record_history() {
-        let (directory, repository) = repository_with_branches();
+    fn refuses_to_merge_a_missing_branch() {
+        let (_directory, repository) = repository_with_branches();
         let repository = Repository::new(repository)
             .into_head_operation()
             .expect("repository should allow HEAD operations");
@@ -1693,13 +1467,6 @@ mod tests {
         repository
             .merge_from(&missing)
             .expect_err("missing merge source should fail");
-
-        assert!(
-            !directory
-                .path()
-                .join(".git/gitbranch-history.sqlite3")
-                .exists()
-        );
     }
 
     #[test]
@@ -1793,24 +1560,12 @@ mod tests {
                 .get_name("main.txt")
                 .is_some()
         );
-        assert_eq!(
-            repository
-                .last_rebase_target()
-                .expect("rebase history should be readable")
-                .as_deref(),
-            Some("feature")
-        );
     }
 
     #[test]
-    fn rejected_rebase_does_not_replace_history() {
+    fn refuses_to_rebase_current_branch_onto_itself() {
         let (_directory, repository) = repository_with_branches();
         let repository = Repository::new(repository);
-        rebase_history::write(
-            &repository.history_database,
-            RebaseRecord::new("main", "feature"),
-        )
-        .expect("initial rebase target should be recorded");
         let main = repository
             .local_branches()
             .expect("branches should be listed")
@@ -1828,13 +1583,6 @@ mod tests {
             .expect_err("a branch should not be rebased onto itself");
 
         assert!(matches!(error, Error::CurrentBranchAsRebaseTarget));
-        assert_eq!(
-            repository
-                .last_rebase_target()
-                .expect("rebase history should remain readable")
-                .as_deref(),
-            Some("feature")
-        );
     }
 
     #[test]
@@ -1897,13 +1645,6 @@ mod tests {
                 .expect("index should open")
                 .has_conflicts()
         );
-        assert_eq!(
-            rebase_history::read(&repository.repository.history_database)
-                .expect("rebase history should be readable")
-                .target_for("main"),
-            Some("feature")
-        );
-
         let repository = Repository::discover(directory.path())
             .expect("active rebase should still allow branch deletion");
         let unrelated = repository

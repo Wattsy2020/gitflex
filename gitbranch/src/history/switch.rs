@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use super::history::{self, Result};
+use super::{self as history, Result};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SwitchHistory {
@@ -74,10 +74,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{SwitchHistory, prune, read, write};
-    use crate::git::{
-        history::database_path,
-        merge_history::{self, MergeRecord},
-        rebase_history::{self, RebaseRecord},
+    use crate::history::{
+        database_path,
+        merge::{self, MergeRecord},
+        rebase::{self, RebaseRecord},
     };
 
     #[test]
@@ -124,9 +124,9 @@ mod tests {
         let database_path = database_path(directory.path());
         write(&database_path, "feature".to_owned()).expect("existing switch should be recorded");
         write(&database_path, "deleted".to_owned()).expect("stale switch should be recorded");
-        merge_history::write(&database_path, MergeRecord::new("main", "deleted"))
+        merge::write(&database_path, MergeRecord::new("main", "deleted"))
             .expect("merge should be recorded");
-        rebase_history::write(&database_path, RebaseRecord::new("main", "deleted"))
+        rebase::write(&database_path, RebaseRecord::new("main", "deleted"))
             .expect("rebase should be recorded");
 
         prune(
@@ -147,13 +147,13 @@ mod tests {
             Some(3)
         );
         assert_eq!(
-            merge_history::read(&database_path)
+            merge::read(&database_path)
                 .expect("merge history should be readable")
                 .rank("main", "deleted"),
             Some(1)
         );
         assert_eq!(
-            rebase_history::read(&database_path)
+            rebase::read(&database_path)
                 .expect("rebase history should be readable")
                 .target_for("main"),
             Some("deleted")

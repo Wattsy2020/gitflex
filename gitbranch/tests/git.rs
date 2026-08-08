@@ -9,9 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use gitbranch::git::{
-    Checkout, ConflictableCommandOutcome, Error, HeadOperationRepository, LocalBranch, Repository,
-};
+use gitbranch::git::{Checkout, ConflictableCommandOutcome, Error, LocalBranch, Repository};
+use gitbranch::history::HistoryStore;
 use tempfile::TempDir;
 
 struct TestRepository {
@@ -83,9 +82,9 @@ impl TestRepository {
         self.git_at(&self.path, arguments)
     }
 
-    fn gitbranch(&self, arguments: &[&str]) -> Output {
+    fn gitbranch_at(&self, path: &Path, arguments: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_gitbranch"))
-            .current_dir(&self.path)
+            .current_dir(path)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &self.home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -98,6 +97,10 @@ impl TestRepository {
             .args(arguments)
             .output()
             .expect("gitbranch should be executable")
+    }
+
+    fn gitbranch(&self, arguments: &[&str]) -> Output {
+        self.gitbranch_at(&self.path, arguments)
     }
 
     fn git_success_at(&self, path: &Path, arguments: &[&str]) -> Output {
@@ -160,10 +163,14 @@ impl TestRepository {
         Repository::discover(&self.path).expect("repository should be discovered")
     }
 
-    fn head_operation(&self) -> HeadOperationRepository {
-        self.discover()
-            .into_head_operation()
-            .expect("repository should allow HEAD operations")
+    fn history(&self) -> HistoryStore {
+        HistoryStore::new(self.path.join(".git"))
+    }
+
+    fn write_invalid_history_database(&self) -> PathBuf {
+        let path = self.path.join(".git/gitbranch-history.sqlite3");
+        fs::write(&path, "invalid database").expect("invalid history database should be written");
+        path
     }
 
     fn worktree_path(&self) -> PathBuf {
@@ -348,13 +355,6 @@ fn switches_to_branch_created_by_git_cli() {
             .git_stdout(&["status", "--porcelain"])
             .is_empty()
     );
-    assert_eq!(
-        repository
-            .switch_history()
-            .expect("switch history should be readable")
-            .rank("feature"),
-        Some(1)
-    );
 }
 
 #[test]
@@ -374,13 +374,66 @@ fn command_line_branch_switches_without_opening_the_ui_and_records_history() {
         test_repository.git_stdout(&["branch", "--show-current"]),
         "feature"
     );
-    let repository = test_repository.head_operation();
     assert_eq!(
-        repository
-            .switch_history()
+        test_repository
+            .history()
+            .read_switch()
             .expect("switch history should be readable")
             .rank("feature"),
         Some(1)
+    );
+}
+
+#[test]
+fn linked_worktree_command_records_history_in_the_common_git_directory() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.create_branch("review");
+    let worktree_path = test_repository.worktree_path();
+    test_repository.git_success(&[
+        "worktree",
+        "add",
+        worktree_path
+            .to_str()
+            .expect("worktree path should be valid UTF-8"),
+        "feature",
+    ]);
+
+    let output = test_repository.gitbranch_at(&worktree_path, &["switch", "review"]);
+
+    assert_gitbranch_success(&["switch", "review"], &output);
+    assert_eq!(
+        test_repository
+            .history()
+            .read_switch()
+            .expect("common switch history should be readable")
+            .rank("review"),
+        Some(1)
+    );
+    assert!(
+        !test_repository
+            .path
+            .join(".git/worktrees/feature-worktree/gitbranch-history.sqlite3")
+            .exists()
+    );
+}
+
+#[test]
+fn switch_succeeds_when_history_database_is_invalid() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    let database_path = test_repository.write_invalid_history_database();
+
+    let output = test_repository.gitbranch(&["switch", "feature"]);
+
+    assert_gitbranch_success(&["switch", "feature"], &output);
+    assert_eq!(
+        test_repository.git_stdout(&["branch", "--show-current"]),
+        "feature"
+    );
+    assert_eq!(
+        fs::read_to_string(database_path).expect("invalid database should remain readable"),
+        "invalid database"
     );
 }
 
@@ -389,40 +442,25 @@ fn exact_command_line_branch_does_not_start_history_pruning() {
     let test_repository = TestRepository::new();
     test_repository.create_branch("deleted");
     test_repository.create_branch("feature");
-    let repository = test_repository.discover();
-    let deleted = branch(&repository, "deleted");
-    let repository = repository
-        .into_head_operation()
-        .expect("repository should allow HEAD operations");
-    repository
-        .switch_to(&deleted)
-        .expect("deleted branch should be switched to");
-    let main = repository
-        .local_branches()
-        .expect("branches should be listed")
-        .into_iter()
-        .find(|branch| branch.name() == "main")
-        .expect("main branch should exist");
-    repository
-        .switch_to(&main)
-        .expect("main branch should be restored");
+    let history = test_repository.history();
+    history
+        .record_switch("deleted")
+        .expect("deleted branch history should be recorded");
     assert_eq!(
-        repository
-            .switch_history()
+        history
+            .read_switch()
             .expect("switch history should be readable")
             .rank("deleted"),
         Some(1)
     );
-    drop(repository);
     test_repository.git_success(&["branch", "-D", "--", "deleted"]);
 
     let output = test_repository.gitbranch(&["switch", "feature"]);
 
     assert_gitbranch_success(&["switch", "feature"], &output);
     assert_eq!(
-        test_repository
-            .head_operation()
-            .switch_history()
+        history
+            .read_switch()
             .expect("switch history should be readable")
             .rank("deleted"),
         Some(1)
@@ -544,13 +582,6 @@ fn merges_diverged_branch_into_state_validated_by_git_cli() {
             .git_stdout(&["status", "--porcelain"])
             .is_empty()
     );
-    assert_eq!(
-        repository
-            .merge_history()
-            .expect("merge history should be readable")
-            .rank("main", "feature"),
-        Some(1)
-    );
 }
 
 #[test]
@@ -574,13 +605,35 @@ fn command_line_branch_merges_without_opening_the_ui_and_records_history() {
         &["merge-base", "--is-ancestor", "feature", "main"],
         &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
     );
-    let repository = test_repository.head_operation();
     assert_eq!(
-        repository
-            .merge_history()
+        test_repository
+            .history()
+            .read_merge()
             .expect("merge history should be readable")
             .rank("main", "feature"),
         Some(1)
+    );
+}
+
+#[test]
+fn merge_succeeds_when_history_database_is_invalid() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature");
+    test_repository.switch_to("main");
+    let database_path = test_repository.write_invalid_history_database();
+
+    let output = test_repository.gitbranch(&["merge", "feature"]);
+
+    assert_gitbranch_success(&["merge", "feature"], &output);
+    assert_success(
+        &["merge-base", "--is-ancestor", "feature", "main"],
+        &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
+    );
+    assert_eq!(
+        fs::read_to_string(database_path).expect("invalid database should remain readable"),
+        "invalid database"
     );
 }
 
@@ -601,10 +654,10 @@ fn invalid_exact_command_line_branch_uses_existing_validation() {
         test_repository.git_stdout(&["rev-parse", "HEAD"]),
         original_tip
     );
-    let repository = test_repository.head_operation();
     assert_eq!(
-        repository
-            .merge_history()
+        test_repository
+            .history()
+            .read_merge()
             .expect("merge history should be readable")
             .rank("main", "main"),
         None
@@ -704,16 +757,22 @@ fn conflicted_merge_can_be_continued_by_git_cli() {
     test_repository.commit_file("shared.txt", "feature\n", "Update shared file on feature");
     test_repository.switch_to("main");
     test_repository.commit_file("shared.txt", "main\n", "Update shared file on main");
-    let repository = test_repository.discover();
-    let feature = branch(&repository, "feature");
-    let repository = repository
-        .into_head_operation()
-        .expect("repository should allow HEAD operations");
 
-    let outcome = repository
-        .merge_from(&feature)
-        .expect("conflict should be returned as an outcome");
-    assert_eq!(outcome, ConflictableCommandOutcome::Conflicted);
+    let output = test_repository.gitbranch(&["merge", "feature"]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr should be valid UTF-8"),
+        "merge stopped due to conflicts; resolve them and run `git merge --continue`, or run `git merge --abort`\n"
+    );
+    assert_eq!(
+        test_repository
+            .history()
+            .read_merge()
+            .expect("merge history should be readable")
+            .rank("main", "feature"),
+        Some(1)
+    );
     assert!(
         !test_repository
             .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
@@ -830,16 +889,56 @@ fn command_line_branch_rebases_without_opening_the_ui_and_records_history() {
         &["merge-base", "--is-ancestor", "feature", "main"],
         &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
     );
-    let repository = test_repository
-        .head_operation()
-        .into_clean_rebase()
-        .expect("repository should allow rebase");
     assert_eq!(
-        repository
-            .last_rebase_target()
+        test_repository
+            .history()
+            .last_rebase_target("main")
             .expect("rebase history should be readable")
             .as_deref(),
         Some("feature")
+    );
+}
+
+#[test]
+fn rebase_succeeds_when_history_database_is_invalid() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature");
+    test_repository.switch_to("main");
+    test_repository.commit_file("main.txt", "main\n", "Add main change");
+    let database_path = test_repository.write_invalid_history_database();
+
+    let output = test_repository.gitbranch(&["rebase", "feature"]);
+
+    assert_gitbranch_success(&["rebase", "feature"], &output);
+    assert_success(
+        &["merge-base", "--is-ancestor", "feature", "main"],
+        &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
+    );
+    assert_eq!(
+        fs::read_to_string(database_path).expect("invalid database should remain readable"),
+        "invalid database"
+    );
+}
+
+#[test]
+fn rejected_command_line_rebase_does_not_record_history() {
+    let test_repository = TestRepository::new();
+
+    let output = test_repository.gitbranch(&["rebase", "main"]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr should be valid UTF-8"),
+        "the current branch cannot be its own rebase target\n"
+    );
+    assert_eq!(
+        test_repository
+            .history()
+            .last_rebase_target("main")
+            .expect("rebase history should be readable"),
+        None
     );
 }
 
@@ -854,19 +953,22 @@ fn conflicted_rebase_can_be_continued_by_git_cli() {
     test_repository.switch_to("main");
     test_repository.commit_file("shared.txt", "main\n", "Update shared file on main");
     test_repository.commit_file("after.txt", "after\n", "Add change after conflict");
-    let repository = test_repository.discover();
-    let feature = branch(&repository, "feature");
-    let repository = repository
-        .into_head_operation()
-        .expect("repository should allow HEAD operations")
-        .into_clean_rebase()
-        .expect("repository should allow rebase");
 
     // try to rebase
-    let outcome = repository
-        .rebase_onto(&feature)
-        .expect("conflict should be returned as an outcome");
-    assert_eq!(outcome, ConflictableCommandOutcome::Conflicted);
+    let output = test_repository.gitbranch(&["rebase", "feature"]);
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr should be valid UTF-8"),
+        "rebase stopped due to conflicts; resolve them and run `git rebase --continue`, or run `git rebase --abort`\n"
+    );
+    assert_eq!(
+        test_repository
+            .history()
+            .last_rebase_target("main")
+            .expect("rebase history should be readable")
+            .as_deref(),
+        Some("feature")
+    );
     assert!(
         !test_repository
             .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])

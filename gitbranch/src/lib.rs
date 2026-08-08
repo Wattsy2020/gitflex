@@ -3,6 +3,7 @@ use thiserror::Error;
 mod clean;
 mod delete;
 pub mod git;
+pub mod history;
 mod merge;
 mod rebase;
 mod switch;

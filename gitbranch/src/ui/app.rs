@@ -10,7 +10,8 @@ use ratatui::{
 use tui_input::InputRequest;
 
 use crate::{
-    git::{Checkout, CleanBranch, LocalBranch, MergeHistory, SwitchHistory},
+    git::{Checkout, CleanBranch, LocalBranch},
+    history::{MergeHistory, SwitchHistory},
     ui::search::Search,
 };
 
@@ -611,7 +612,10 @@ mod tests {
     };
     use tui_input::InputRequest;
 
-    use crate::git::{Checkout, CleanBranch, LocalBranch, MergeHistory, SwitchHistory};
+    use crate::{
+        git::{Checkout, CleanBranch, LocalBranch},
+        history::{MergeHistory, SwitchHistory},
+    };
 
     use super::{Action, AppImpl, Branch, Confirmation, Transition};
 
