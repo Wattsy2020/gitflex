@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use super::{self as history, Result};
+use super::database::{self as history, Result};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SwitchHistory {
@@ -70,7 +70,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{SwitchHistory, read, write};
-    use crate::history::database_path;
+    use crate::history::database::database_path;
 
     #[test]
     fn missing_history_is_empty_and_repeated_branches_receive_the_next_rank() {

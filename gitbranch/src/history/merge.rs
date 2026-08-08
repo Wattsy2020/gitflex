@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use super::{self as history, Result};
+use super::database::{self as history, Result};
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct MergeRecord {
@@ -91,7 +91,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{MergeHistory, MergeRecord, read, write};
-    use crate::history::database_path;
+    use crate::history::database::database_path;
 
     #[test]
     fn missing_history_is_empty_and_destinations_are_independent() {

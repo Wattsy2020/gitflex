@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use gitbranch::git::{Checkout, ConflictableCommandOutcome, Error, LocalBranch, Repository};
-use gitbranch::history::HistoryStore;
+use gitbranch::history::{DATABASE_FILE_NAME, HistoryStore};
 use tempfile::TempDir;
 
 struct TestRepository {
@@ -168,7 +168,7 @@ impl TestRepository {
     }
 
     fn write_invalid_history_database(&self) -> PathBuf {
-        let path = self.path.join(".git/gitbranch-history.sqlite3");
+        let path = self.path.join(".git").join(DATABASE_FILE_NAME);
         fs::write(&path, "invalid database").expect("invalid history database should be written");
         path
     }
@@ -413,7 +413,8 @@ fn linked_worktree_command_records_history_in_the_common_git_directory() {
     assert!(
         !test_repository
             .path
-            .join(".git/worktrees/feature-worktree/gitbranch-history.sqlite3")
+            .join(".git/worktrees/feature-worktree/")
+            .join(DATABASE_FILE_NAME)
             .exists()
     );
 }

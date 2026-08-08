@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::Path};
 
-use super::{self as history, Result};
+use super::database::{self as history, Result};
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct RebaseRecord {
@@ -66,7 +66,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{RebaseHistory, RebaseRecord, read, write};
-    use crate::history::database_path;
+    use crate::history::database::database_path;
 
     #[test]
     fn missing_history_is_empty_and_records_are_replaced_per_source() {
