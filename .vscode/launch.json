@@ -4,7 +4,7 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug gitbranch switch",
+            "name": "Debug gitflex switch",
             "cargo": {
                 "args": [
                     "build",

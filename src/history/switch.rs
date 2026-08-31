@@ -90,14 +90,14 @@ mod tests {
         assert_eq!(history.rank("feature"), Some(3));
         assert_eq!(history.rank("review"), Some(2));
         assert!(database_path.exists());
-        assert!(!directory.path().join("gitbranch-switches").exists());
-        assert!(!directory.path().join("gitbranch-switches.lock").exists());
+        assert!(!directory.path().join("gitflex-switches").exists());
+        assert!(!directory.path().join("gitflex-switches.lock").exists());
     }
 
     #[test]
     fn legacy_history_is_ignored_and_left_untouched() {
         let directory = TempDir::new().expect("temporary directory should be created");
-        let legacy_path = directory.path().join("gitbranch-switches");
+        let legacy_path = directory.path().join("gitflex-switches");
         fs::write(&legacy_path, "feature\t99\n").expect("legacy history should be written");
 
         assert_eq!(

@@ -577,7 +577,7 @@ mod tests {
                 .set_str("user.name", "Git Branch Tests")
                 .expect("user name should be configured");
             config
-                .set_str("user.email", "gitbranch@example.com")
+                .set_str("user.email", "gitflex@example.com")
                 .expect("user email should be configured");
         }
 
@@ -586,7 +586,7 @@ mod tests {
             index.write_tree().expect("empty tree should be written")
         };
         let tree = repository.find_tree(tree_id).expect("tree should exist");
-        let signature = Signature::now("Git Branch", "gitbranch@example.com")
+        let signature = Signature::now("Git Branch", "gitflex@example.com")
             .expect("signature should be valid");
         let commit_id = repository
             .commit(

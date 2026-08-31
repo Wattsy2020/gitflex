@@ -9,8 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use gitbranch::git::{Checkout, ConflictableCommandOutcome, Error, LocalBranch, Repository};
-use gitbranch::history::{DATABASE_FILE_NAME, HistoryStore};
+use gitflex::git::{Checkout, ConflictableCommandOutcome, Error, LocalBranch, Repository};
+use gitflex::history::{HistoryStore, DATABASE_FILE_NAME};
 use tempfile::TempDir;
 
 struct TestRepository {
@@ -42,7 +42,7 @@ impl TestRepository {
             &["init", "--initial-branch=main", path],
         );
         repository.git_success(&["config", "user.name", "Git Branch Tests"]);
-        repository.git_success(&["config", "user.email", "gitbranch@example.com"]);
+        repository.git_success(&["config", "user.email", "gitflex@example.com"]);
         repository.git_success(&["config", "commit.gpgSign", "false"]);
         repository.git_success(&["config", "core.autocrlf", "false"]);
         repository.git_success(&[
@@ -82,8 +82,8 @@ impl TestRepository {
         self.git_at(&self.path, arguments)
     }
 
-    fn gitbranch_at(&self, path: &Path, arguments: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_gitbranch"))
+    fn gitflex_at(&self, path: &Path, arguments: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_gitflex"))
             .current_dir(path)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", &self.home)
@@ -96,11 +96,11 @@ impl TestRepository {
             .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
             .args(arguments)
             .output()
-            .expect("gitbranch should be executable")
+            .expect("gitflex should be executable")
     }
 
-    fn gitbranch(&self, arguments: &[&str]) -> Output {
-        self.gitbranch_at(&self.path, arguments)
+    fn gitflex(&self, arguments: &[&str]) -> Output {
+        self.gitflex_at(&self.path, arguments)
     }
 
     fn git_success_at(&self, path: &Path, arguments: &[&str]) -> Output {
@@ -189,10 +189,10 @@ fn assert_success(arguments: &[&str], output: &Output) {
     );
 }
 
-fn assert_gitbranch_success(arguments: &[&str], output: &Output) {
+fn assert_gitflex_success(arguments: &[&str], output: &Output) {
     assert!(
         output.status.success(),
-        "gitbranch {} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        "gitflex {} failed with {}\nstdout:\n{}\nstderr:\n{}",
         arguments.join(" "),
         output.status,
         String::from_utf8_lossy(&output.stdout),
@@ -232,9 +232,9 @@ fn command_line_branch_deletes_without_opening_the_ui() {
     let test_repository = TestRepository::new();
     test_repository.create_branch("feature");
 
-    let output = test_repository.gitbranch(&["delete", "feature"]);
+    let output = test_repository.gitflex(&["delete", "feature"]);
 
-    assert_gitbranch_success(&["delete", "feature"], &output);
+    assert_gitflex_success(&["delete", "feature"], &output);
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
         "Deleted branch feature.\n"
@@ -350,11 +350,9 @@ fn switches_to_branch_created_by_git_cli() {
         test_repository.git_stdout(&["show", "HEAD:feature.txt"]),
         "feature"
     );
-    assert!(
-        test_repository
-            .git_stdout(&["status", "--porcelain"])
-            .is_empty()
-    );
+    assert!(test_repository
+        .git_stdout(&["status", "--porcelain"])
+        .is_empty());
 }
 
 #[test]
@@ -362,9 +360,9 @@ fn command_line_branch_switches_without_opening_the_ui_and_records_history() {
     let test_repository = TestRepository::new();
     test_repository.create_branch("feature");
 
-    let output = test_repository.gitbranch(&["switch", "feature"]);
+    let output = test_repository.gitflex(&["switch", "feature"]);
 
-    assert_gitbranch_success(&["switch", "feature"], &output);
+    assert_gitflex_success(&["switch", "feature"], &output);
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
         "Switched to branch feature.\n"
@@ -399,9 +397,9 @@ fn linked_worktree_command_records_history_in_the_common_git_directory() {
         "feature",
     ]);
 
-    let output = test_repository.gitbranch_at(&worktree_path, &["switch", "review"]);
+    let output = test_repository.gitflex_at(&worktree_path, &["switch", "review"]);
 
-    assert_gitbranch_success(&["switch", "review"], &output);
+    assert_gitflex_success(&["switch", "review"], &output);
     assert_eq!(
         test_repository
             .history()
@@ -410,13 +408,11 @@ fn linked_worktree_command_records_history_in_the_common_git_directory() {
             .rank("review"),
         Some(1)
     );
-    assert!(
-        !test_repository
-            .path
-            .join(".git/worktrees/feature-worktree/")
-            .join(DATABASE_FILE_NAME)
-            .exists()
-    );
+    assert!(!test_repository
+        .path
+        .join(".git/worktrees/feature-worktree/")
+        .join(DATABASE_FILE_NAME)
+        .exists());
 }
 
 #[test]
@@ -425,9 +421,9 @@ fn switch_succeeds_when_history_database_is_invalid() {
     test_repository.create_branch("feature");
     let database_path = test_repository.write_invalid_history_database();
 
-    let output = test_repository.gitbranch(&["switch", "feature"]);
+    let output = test_repository.gitflex(&["switch", "feature"]);
 
-    assert_gitbranch_success(&["switch", "feature"], &output);
+    assert_gitflex_success(&["switch", "feature"], &output);
     assert_eq!(
         test_repository.git_stdout(&["branch", "--show-current"]),
         "feature"
@@ -456,9 +452,9 @@ fn exact_command_line_branch_does_not_start_history_pruning() {
     );
     test_repository.git_success(&["branch", "-D", "--", "deleted"]);
 
-    let output = test_repository.gitbranch(&["switch", "feature"]);
+    let output = test_repository.gitflex(&["switch", "feature"]);
 
-    assert_gitbranch_success(&["switch", "feature"], &output);
+    assert_gitflex_success(&["switch", "feature"], &output);
     assert_eq!(
         history
             .read_switch()
@@ -578,11 +574,9 @@ fn merges_diverged_branch_into_state_validated_by_git_cli() {
         test_repository.git_stdout(&["show", "main:feature.txt"]),
         "feature"
     );
-    assert!(
-        test_repository
-            .git_stdout(&["status", "--porcelain"])
-            .is_empty()
-    );
+    assert!(test_repository
+        .git_stdout(&["status", "--porcelain"])
+        .is_empty());
 }
 
 #[test]
@@ -594,9 +588,9 @@ fn command_line_branch_merges_without_opening_the_ui_and_records_history() {
     test_repository.switch_to("main");
     test_repository.commit_file("main.txt", "main\n", "Add main change");
 
-    let output = test_repository.gitbranch(&["merge", "feature"]);
+    let output = test_repository.gitflex(&["merge", "feature"]);
 
-    assert_gitbranch_success(&["merge", "feature"], &output);
+    assert_gitflex_success(&["merge", "feature"], &output);
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
         "Merged feature into main.\n"
@@ -625,9 +619,9 @@ fn merge_succeeds_when_history_database_is_invalid() {
     test_repository.switch_to("main");
     let database_path = test_repository.write_invalid_history_database();
 
-    let output = test_repository.gitbranch(&["merge", "feature"]);
+    let output = test_repository.gitflex(&["merge", "feature"]);
 
-    assert_gitbranch_success(&["merge", "feature"], &output);
+    assert_gitflex_success(&["merge", "feature"], &output);
     assert_success(
         &["merge-base", "--is-ancestor", "feature", "main"],
         &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
@@ -643,7 +637,7 @@ fn invalid_exact_command_line_branch_uses_existing_validation() {
     let test_repository = TestRepository::new();
     let original_tip = test_repository.git_stdout(&["rev-parse", "HEAD"]);
 
-    let output = test_repository.gitbranch(&["merge", "main"]);
+    let output = test_repository.gitflex(&["merge", "main"]);
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
@@ -741,12 +735,10 @@ fn conflicting_tracked_changes_prevent_merge_without_data_loss() {
             .expect("tracked file should remain"),
         "local\n"
     );
-    assert!(
-        !test_repository
-            .git(&["rev-parse", "--verify", "MERGE_HEAD"])
-            .status
-            .success()
-    );
+    assert!(!test_repository
+        .git(&["rev-parse", "--verify", "MERGE_HEAD"])
+        .status
+        .success());
 }
 
 #[test]
@@ -759,7 +751,7 @@ fn conflicted_merge_can_be_continued_by_git_cli() {
     test_repository.switch_to("main");
     test_repository.commit_file("shared.txt", "main\n", "Update shared file on main");
 
-    let output = test_repository.gitbranch(&["merge", "feature"]);
+    let output = test_repository.gitflex(&["merge", "feature"]);
 
     assert!(!output.status.success());
     assert_eq!(
@@ -774,11 +766,9 @@ fn conflicted_merge_can_be_continued_by_git_cli() {
             .rank("main", "feature"),
         Some(1)
     );
-    assert!(
-        !test_repository
-            .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
-            .is_empty()
-    );
+    assert!(!test_repository
+        .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
+        .is_empty());
     test_repository.git_success(&["rev-parse", "--verify", "MERGE_HEAD"]);
 
     fs::write(test_repository.path.join("shared.txt"), "resolved\n")
@@ -804,11 +794,9 @@ fn conflicted_merge_can_be_continued_by_git_cli() {
         test_repository.git_stdout(&["show", "main:shared.txt"]),
         "resolved"
     );
-    assert!(
-        test_repository
-            .git_stdout(&["status", "--porcelain"])
-            .is_empty()
-    );
+    assert!(test_repository
+        .git_stdout(&["status", "--porcelain"])
+        .is_empty());
 }
 
 #[test]
@@ -862,11 +850,9 @@ fn rebases_diverged_branch_into_state_validated_by_git_cli() {
         test_repository.git_stdout(&["show", "main:feature.txt"]),
         "feature"
     );
-    assert!(
-        test_repository
-            .git_stdout(&["status", "--porcelain"])
-            .is_empty()
-    );
+    assert!(test_repository
+        .git_stdout(&["status", "--porcelain"])
+        .is_empty());
 }
 
 #[test]
@@ -878,9 +864,9 @@ fn command_line_branch_rebases_without_opening_the_ui_and_records_history() {
     test_repository.switch_to("main");
     test_repository.commit_file("main.txt", "main\n", "Add main change");
 
-    let output = test_repository.gitbranch(&["rebase", "feature"]);
+    let output = test_repository.gitflex(&["rebase", "feature"]);
 
-    assert_gitbranch_success(&["rebase", "feature"], &output);
+    assert_gitflex_success(&["rebase", "feature"], &output);
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
         "Rebased main onto feature.\n"
@@ -910,9 +896,9 @@ fn rebase_succeeds_when_history_database_is_invalid() {
     test_repository.commit_file("main.txt", "main\n", "Add main change");
     let database_path = test_repository.write_invalid_history_database();
 
-    let output = test_repository.gitbranch(&["rebase", "feature"]);
+    let output = test_repository.gitflex(&["rebase", "feature"]);
 
-    assert_gitbranch_success(&["rebase", "feature"], &output);
+    assert_gitflex_success(&["rebase", "feature"], &output);
     assert_success(
         &["merge-base", "--is-ancestor", "feature", "main"],
         &test_repository.git(&["merge-base", "--is-ancestor", "feature", "main"]),
@@ -927,7 +913,7 @@ fn rebase_succeeds_when_history_database_is_invalid() {
 fn rejected_command_line_rebase_does_not_record_history() {
     let test_repository = TestRepository::new();
 
-    let output = test_repository.gitbranch(&["rebase", "main"]);
+    let output = test_repository.gitflex(&["rebase", "main"]);
 
     assert!(!output.status.success());
     assert_eq!(
@@ -956,7 +942,7 @@ fn conflicted_rebase_can_be_continued_by_git_cli() {
     test_repository.commit_file("after.txt", "after\n", "Add change after conflict");
 
     // try to rebase
-    let output = test_repository.gitbranch(&["rebase", "feature"]);
+    let output = test_repository.gitflex(&["rebase", "feature"]);
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr should be valid UTF-8"),
@@ -970,11 +956,9 @@ fn conflicted_rebase_can_be_continued_by_git_cli() {
             .as_deref(),
         Some("feature")
     );
-    assert!(
-        !test_repository
-            .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
-            .is_empty()
-    );
+    assert!(!test_repository
+        .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
+        .is_empty());
 
     // fix the conflict and continue rebasing
     fs::write(test_repository.path.join("shared.txt"), "resolved\n")
@@ -1005,11 +989,9 @@ fn conflicted_rebase_can_be_continued_by_git_cli() {
         test_repository.git_stdout(&["show", "main:after.txt"]),
         "after"
     );
-    assert!(
-        test_repository
-            .git_stdout(&["status", "--porcelain"])
-            .is_empty()
-    );
+    assert!(test_repository
+        .git_stdout(&["status", "--porcelain"])
+        .is_empty());
 }
 
 #[test]

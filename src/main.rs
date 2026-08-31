@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use gitbranch::git::Repository;
+use gitflex::git::Repository;
 
 #[derive(Debug, Parser)]
 #[command(about = "Operate on local Git branches")]
@@ -37,22 +37,22 @@ enum Command {
     },
 }
 
-fn run() -> Result<(), gitbranch::Error> {
+fn run() -> Result<(), gitflex::Error> {
     let command = Cli::parse().command;
     let repository = Repository::discover(".")?;
 
     match command {
-        Command::Clean => gitbranch::run_clean(&repository)?,
-        Command::Delete { branch } => gitbranch::run_delete(&repository, branch.as_deref())?,
+        Command::Clean => gitflex::run_clean(&repository)?,
+        Command::Delete { branch } => gitflex::run_delete(&repository, branch.as_deref())?,
         Command::Switch { branch } => {
-            gitbranch::run_switch(&repository.into_head_operation()?, branch.as_deref())?
+            gitflex::run_switch(&repository.into_head_operation()?, branch.as_deref())?
         }
-        Command::Rebase { branch } => gitbranch::run_rebase(
+        Command::Rebase { branch } => gitflex::run_rebase(
             &repository.into_head_operation()?.into_clean_rebase()?,
             branch.as_deref(),
         )?,
         Command::Merge { branch } => {
-            gitbranch::run_merge(&repository.into_head_operation()?, branch.as_deref())?
+            gitflex::run_merge(&repository.into_head_operation()?, branch.as_deref())?
         }
     }
 
@@ -87,7 +87,7 @@ mod tests {
             ("rebase", "feature/rebase"),
             ("merge", "feature/merge"),
         ] {
-            let command = Cli::try_parse_from(["gitbranch", operation, expected_branch])
+            let command = Cli::try_parse_from(["gitflex", operation, expected_branch])
                 .expect("a branch argument should be accepted")
                 .command;
             let branch = match command {
@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn single_operations_remain_interactive_without_an_argument() {
         for operation in ["delete", "switch", "rebase", "merge"] {
-            let command = Cli::try_parse_from(["gitbranch", operation])
+            let command = Cli::try_parse_from(["gitflex", operation])
                 .expect("the branch argument should remain optional")
                 .command;
             let branch = match command {
@@ -122,6 +122,6 @@ mod tests {
 
     #[test]
     fn clean_does_not_accept_a_branch_argument() {
-        assert!(Cli::try_parse_from(["gitbranch", "clean", "feature"]).is_err());
+        assert!(Cli::try_parse_from(["gitflex", "clean", "feature"]).is_err());
     }
 }

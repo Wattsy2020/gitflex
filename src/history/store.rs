@@ -77,7 +77,7 @@ impl HistoryStore {
 
         let path = self.database_path.to_owned();
         let _ = thread::Builder::new()
-            .name("gitbranch-history-prune".to_owned())
+            .name("gitflex-history-prune".to_owned())
             .spawn(move || {
                 let _ = prune_missing(&path, existing_branches, delete_sql);
             });

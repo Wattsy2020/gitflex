@@ -9,7 +9,7 @@ use std::{
 use sqlx::{ConnectOptions, Connection, Executor, SqliteConnection, sqlite::SqliteConnectOptions};
 use thiserror::Error;
 
-pub const DATABASE_FILE_NAME: &str = "gitbranch-history.sqlite3";
+pub const DATABASE_FILE_NAME: &str = "gitflex-history.sqlite3";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS switch_history (
