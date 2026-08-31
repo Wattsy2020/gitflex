@@ -1,7 +1,10 @@
 [package]
-name = "gitbranch"
+name = "gitflex"
 version = "0.1.0"
 edition = "2024"
+description = "A git wrapper TUI that cleans up old branches and makes it easier to switch, rebase, and merge in a repo with many branches"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Wattsy2020/gitflex"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

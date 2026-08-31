@@ -24,6 +24,4 @@ Use libraries where relevant, both those already in the cargo.toml and other use
 
 If you see something that could be changed that would clearly improve the codebase, change it.
 
-Consider what errors to expose to the user. If our tool can still accomplish the users intent, e.g. delete a branch or switch or rebase, then there is no need to expose a minor error such as the user's email not being configured, or failing to read/write an internal file.
-
-For the gitbranch tool, when adding new features that query or use libgit2, add an integration test in tests/git.rs as well
+Consider what errors to expose to the user. If our tool can still accomplish the users intent, e.g. delete a branch or switch or rebase, then there is no need to expose a minor error such as the user's email not being configured, or failing to read/write an internal file. When adding new features that query or use libgit2, add an integration test in tests/git.rs as well
