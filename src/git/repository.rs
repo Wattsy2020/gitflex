@@ -13,6 +13,7 @@ use git2::{
 use thiserror::Error;
 
 use crate::git::Error::DeletedWorktree;
+use crate::git::cherry::is_rewritten_onto;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Checkout {
@@ -267,6 +268,7 @@ impl Repository {
                     Some(base_tip) => {
                         tip.id() == base_tip
                             || self.inner.graph_descendant_of(base_tip, tip.id())?
+                            || is_rewritten_onto(&self.inner, tip.id(), base_tip)?
                     }
                     None => false,
                 };
@@ -586,8 +588,8 @@ mod tests {
             index.write_tree().expect("empty tree should be written")
         };
         let tree = repository.find_tree(tree_id).expect("tree should exist");
-        let signature = Signature::now("Git Branch", "gitflex@example.com")
-            .expect("signature should be valid");
+        let signature =
+            Signature::now("Git Branch", "gitflex@example.com").expect("signature should be valid");
         let commit_id = repository
             .commit(
                 Some("HEAD"),

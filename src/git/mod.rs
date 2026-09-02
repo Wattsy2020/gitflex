@@ -1,3 +1,4 @@
+mod cherry;
 mod repository;
 
 pub use repository::{
