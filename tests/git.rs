@@ -9,8 +9,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use gitflex::git::{Checkout, ConflictableCommandOutcome, Error, LocalBranch, Repository};
-use gitflex::history::{HistoryStore, DATABASE_FILE_NAME};
+use gitflex::git::{
+    Checkout, CleanBranch, ConflictableCommandOutcome, Error, LocalBranch, Repository,
+};
+use gitflex::history::{DATABASE_FILE_NAME, HistoryStore};
 use tempfile::TempDir;
 
 struct TestRepository {
@@ -209,6 +211,13 @@ fn branch(repository: &Repository, name: &str) -> LocalBranch {
         .unwrap_or_else(|| panic!("branch {name} should exist"))
 }
 
+fn clean_branch<'a>(branches: &'a [CleanBranch], name: &str) -> &'a CleanBranch {
+    branches
+        .iter()
+        .find(|branch| branch.name() == name)
+        .unwrap_or_else(|| panic!("branch {name} should exist"))
+}
+
 #[test]
 fn deletes_branch_created_by_git_cli() {
     let test_repository = TestRepository::new();
@@ -270,21 +279,139 @@ fn describes_clean_branches_created_by_git_cli() {
         .discover()
         .clean_branches()
         .expect("clean branches should be described");
-    let branch = |name: &str| {
-        branches
-            .iter()
-            .find(|branch| branch.name() == name)
-            .unwrap_or_else(|| panic!("branch {name} should exist"))
-    };
 
-    assert!(branch("main").is_trunk());
-    assert!(branch("main").is_merged());
-    assert!(!branch("merged").is_trunk());
-    assert!(branch("merged").is_merged());
-    assert!(!branch("own-feature").is_merged());
-    assert!(!branch("own-feature").is_authored_by_other());
-    assert!(!branch("review").is_merged());
-    assert!(branch("review").is_authored_by_other());
+    assert!(clean_branch(&branches, "main").is_trunk());
+    assert!(clean_branch(&branches, "main").is_merged());
+    assert!(!clean_branch(&branches, "merged").is_trunk());
+    assert!(clean_branch(&branches, "merged").is_merged());
+    assert!(!clean_branch(&branches, "own-feature").is_merged());
+    assert!(!clean_branch(&branches, "own-feature").is_authored_by_other());
+    assert!(!clean_branch(&branches, "review").is_merged());
+    assert!(clean_branch(&branches, "review").is_authored_by_other());
+}
+
+#[test]
+fn describes_rebased_stack_layers_as_merged() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("first");
+    test_repository.switch_to("first");
+    test_repository.commit_file("first.txt", "first\n", "Add first layer");
+    let original_first = test_repository.git_stdout(&["rev-parse", "HEAD"]);
+
+    test_repository.create_branch("second");
+    test_repository.switch_to("second");
+    test_repository.commit_file("second.txt", "second\n", "Add second layer");
+    let original_second = test_repository.git_stdout(&["rev-parse", "HEAD"]);
+
+    test_repository.create_branch("third");
+    test_repository.switch_to("third");
+    test_repository.commit_file("third.txt", "third\n", "Add unmerged third layer");
+
+    test_repository.git_success(&["branch", "landed", "second"]);
+    test_repository.switch_to("main");
+    test_repository.commit_file("main.txt", "main\n", "Advance main");
+    test_repository.switch_to("landed");
+    test_repository.git_success(&["rebase", "main"]);
+    test_repository.switch_to("main");
+    test_repository.git_success(&["merge", "--ff-only", "landed"]);
+    test_repository.git_success(&["branch", "--delete", "landed"]);
+
+    assert_eq!(
+        test_repository
+            .git(&["merge-base", "--is-ancestor", &original_first, "main"])
+            .status
+            .code(),
+        Some(1)
+    );
+    assert_eq!(
+        test_repository
+            .git(&["merge-base", "--is-ancestor", &original_second, "main"])
+            .status
+            .code(),
+        Some(1)
+    );
+
+    let branches = test_repository
+        .discover()
+        .clean_branches()
+        .expect("clean branches should be described");
+
+    assert!(clean_branch(&branches, "first").is_merged());
+    assert!(clean_branch(&branches, "second").is_merged());
+    assert!(!clean_branch(&branches, "third").is_merged());
+}
+
+#[test]
+fn does_not_describe_unique_merge_resolution_as_merged() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature change");
+
+    test_repository.switch_to("main");
+    test_repository.create_branch("side");
+    test_repository.switch_to("side");
+    test_repository.commit_file("side.txt", "side\n", "Add side change");
+
+    test_repository.switch_to("feature");
+    test_repository.git_success(&["merge", "--no-ff", "--no-commit", "side"]);
+    test_repository.commit_file(
+        "resolution.txt",
+        "merge-only resolution\n",
+        "Merge side with a unique resolution",
+    );
+    let feature_parent = test_repository.git_stdout(&["rev-parse", "feature^1"]);
+    let side_parent = test_repository.git_stdout(&["rev-parse", "feature^2"]);
+
+    test_repository.switch_to("main");
+    test_repository.commit_file("main.txt", "main\n", "Advance main");
+    test_repository.git_success(&["cherry-pick", &feature_parent]);
+    test_repository.git_success(&["cherry-pick", &side_parent]);
+    assert_eq!(
+        test_repository
+            .git(&["cat-file", "-e", "main:resolution.txt"])
+            .status
+            .code(),
+        Some(128)
+    );
+
+    let branches = test_repository
+        .discover()
+        .clean_branches()
+        .expect("clean branches should be described");
+
+    assert!(!clean_branch(&branches, "feature").is_merged());
+}
+
+#[test]
+fn rewritten_commit_inspection_error_leaves_branch_unmerged() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.switch_to("feature");
+    test_repository.commit_file("feature.txt", "feature\n", "Add feature");
+    let blob_id = test_repository.git_stdout(&["rev-parse", "feature:feature.txt"]);
+
+    test_repository.switch_to("main");
+    test_repository.commit_file("main.txt", "main\n", "Advance main");
+    test_repository.git_success(&["cherry-pick", "feature"]);
+
+    let (object_directory, object_name) = blob_id.split_at(2);
+    fs::remove_file(
+        test_repository
+            .path
+            .join(".git/objects")
+            .join(object_directory)
+            .join(object_name),
+    )
+    .expect("feature blob should be removed");
+
+    let branches = test_repository
+        .discover()
+        .clean_branches()
+        .expect("a patch inspection error should not prevent branch cleanup");
+
+    assert!(!clean_branch(&branches, "feature").is_merged());
+    assert!(clean_branch(&branches, "main").is_merged());
 }
 
 #[test]
@@ -350,9 +477,11 @@ fn switches_to_branch_created_by_git_cli() {
         test_repository.git_stdout(&["show", "HEAD:feature.txt"]),
         "feature"
     );
-    assert!(test_repository
-        .git_stdout(&["status", "--porcelain"])
-        .is_empty());
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
 }
 
 #[test]
@@ -408,11 +537,13 @@ fn linked_worktree_command_records_history_in_the_common_git_directory() {
             .rank("review"),
         Some(1)
     );
-    assert!(!test_repository
-        .path
-        .join(".git/worktrees/feature-worktree/")
-        .join(DATABASE_FILE_NAME)
-        .exists());
+    assert!(
+        !test_repository
+            .path
+            .join(".git/worktrees/feature-worktree/")
+            .join(DATABASE_FILE_NAME)
+            .exists()
+    );
 }
 
 #[test]
@@ -574,9 +705,11 @@ fn merges_diverged_branch_into_state_validated_by_git_cli() {
         test_repository.git_stdout(&["show", "main:feature.txt"]),
         "feature"
     );
-    assert!(test_repository
-        .git_stdout(&["status", "--porcelain"])
-        .is_empty());
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
 }
 
 #[test]
@@ -735,10 +868,12 @@ fn conflicting_tracked_changes_prevent_merge_without_data_loss() {
             .expect("tracked file should remain"),
         "local\n"
     );
-    assert!(!test_repository
-        .git(&["rev-parse", "--verify", "MERGE_HEAD"])
-        .status
-        .success());
+    assert!(
+        !test_repository
+            .git(&["rev-parse", "--verify", "MERGE_HEAD"])
+            .status
+            .success()
+    );
 }
 
 #[test]
@@ -766,9 +901,11 @@ fn conflicted_merge_can_be_continued_by_git_cli() {
             .rank("main", "feature"),
         Some(1)
     );
-    assert!(!test_repository
-        .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
-        .is_empty());
+    assert!(
+        !test_repository
+            .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
+            .is_empty()
+    );
     test_repository.git_success(&["rev-parse", "--verify", "MERGE_HEAD"]);
 
     fs::write(test_repository.path.join("shared.txt"), "resolved\n")
@@ -794,9 +931,11 @@ fn conflicted_merge_can_be_continued_by_git_cli() {
         test_repository.git_stdout(&["show", "main:shared.txt"]),
         "resolved"
     );
-    assert!(test_repository
-        .git_stdout(&["status", "--porcelain"])
-        .is_empty());
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
 }
 
 #[test]
@@ -850,9 +989,11 @@ fn rebases_diverged_branch_into_state_validated_by_git_cli() {
         test_repository.git_stdout(&["show", "main:feature.txt"]),
         "feature"
     );
-    assert!(test_repository
-        .git_stdout(&["status", "--porcelain"])
-        .is_empty());
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
 }
 
 #[test]
@@ -956,9 +1097,11 @@ fn conflicted_rebase_can_be_continued_by_git_cli() {
             .as_deref(),
         Some("feature")
     );
-    assert!(!test_repository
-        .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
-        .is_empty());
+    assert!(
+        !test_repository
+            .git_stdout(&["ls-files", "--unmerged", "--", "shared.txt"])
+            .is_empty()
+    );
 
     // fix the conflict and continue rebasing
     fs::write(test_repository.path.join("shared.txt"), "resolved\n")
@@ -989,9 +1132,11 @@ fn conflicted_rebase_can_be_continued_by_git_cli() {
         test_repository.git_stdout(&["show", "main:after.txt"]),
         "after"
     );
-    assert!(test_repository
-        .git_stdout(&["status", "--porcelain"])
-        .is_empty());
+    assert!(
+        test_repository
+            .git_stdout(&["status", "--porcelain"])
+            .is_empty()
+    );
 }
 
 #[test]

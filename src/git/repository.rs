@@ -13,7 +13,7 @@ use git2::{
 use thiserror::Error;
 
 use crate::git::Error::DeletedWorktree;
-use crate::git::cherry::is_rewritten_onto;
+use crate::git::cherry::RewrittenCommitChecker;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Checkout {
@@ -255,6 +255,7 @@ impl Repository {
         // ignore any errors when retrieving user email
         // if the user hasn't configured their email then we will ignore that rule, and continue the UI flow
         let user_email = configured_user_email(&self.inner).ok().flatten();
+        let mut rewritten_commits = RewrittenCommitChecker::new(&self.inner);
 
         branches
             .into_iter()
@@ -268,7 +269,9 @@ impl Repository {
                     Some(base_tip) => {
                         tip.id() == base_tip
                             || self.inner.graph_descendant_of(base_tip, tip.id())?
-                            || is_rewritten_onto(&self.inner, tip.id(), base_tip)?
+                            || rewritten_commits
+                                .is_rewritten_onto(tip.id(), base_tip)
+                                .unwrap_or(false)
                     }
                     None => false,
                 };
