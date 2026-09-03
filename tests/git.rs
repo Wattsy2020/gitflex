@@ -127,6 +127,12 @@ impl TestRepository {
         self.git_stdout_at(&self.path, arguments)
     }
 
+    fn remove_loose_object(&self, object_id: &str) {
+        let (directory, name) = object_id.split_at(2);
+        fs::remove_file(self.path.join(".git/objects").join(directory).join(name))
+            .expect("loose Git object should be removed");
+    }
+
     fn create_branch(&self, name: &str) {
         self.git_success(&["branch", name]);
     }
@@ -291,6 +297,44 @@ fn describes_clean_branches_created_by_git_cli() {
 }
 
 #[test]
+fn damaged_branch_tip_does_not_prevent_cleaning() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("damaged");
+    test_repository.switch_to("damaged");
+    test_repository.commit_file("damaged.txt", "damaged\n", "Add damaged change");
+    let damaged_tip = test_repository.git_stdout(&["rev-parse", "damaged"]);
+    test_repository.switch_to("main");
+    test_repository.remove_loose_object(&damaged_tip);
+
+    let branches = test_repository
+        .discover()
+        .clean_branches()
+        .expect("a damaged branch should not prevent branch cleanup");
+
+    let damaged = clean_branch(&branches, "damaged");
+    assert!(!damaged.is_merged());
+    assert!(!damaged.is_authored_by_other());
+    assert!(clean_branch(&branches, "main").is_merged());
+}
+
+#[test]
+fn dangling_base_ref_does_not_prevent_cleaning() {
+    let test_repository = TestRepository::new();
+    test_repository.create_branch("feature");
+    test_repository.git_success(&["symbolic-ref", "refs/heads/main", "refs/heads/missing"]);
+
+    let branches = test_repository
+        .discover()
+        .clean_branches()
+        .expect("a dangling base ref should not prevent branch cleanup");
+
+    let main = clean_branch(&branches, "main");
+    assert!(main.is_trunk());
+    assert!(!main.is_merged());
+    assert!(!clean_branch(&branches, "feature").is_merged());
+}
+
+#[test]
 fn describes_rebased_stack_layers_as_merged() {
     let test_repository = TestRepository::new();
     test_repository.create_branch("first");
@@ -395,15 +439,7 @@ fn rewritten_commit_inspection_error_leaves_branch_unmerged() {
     test_repository.commit_file("main.txt", "main\n", "Advance main");
     test_repository.git_success(&["cherry-pick", "feature"]);
 
-    let (object_directory, object_name) = blob_id.split_at(2);
-    fs::remove_file(
-        test_repository
-            .path
-            .join(".git/objects")
-            .join(object_directory)
-            .join(object_name),
-    )
-    .expect("feature blob should be removed");
+    test_repository.remove_loose_object(&blob_id);
 
     let branches = test_repository
         .discover()

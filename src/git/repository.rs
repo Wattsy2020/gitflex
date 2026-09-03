@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
+use git2::Commit;
 use git2::Worktree;
 use git2::build::CheckoutBuilder;
 use git2::{
@@ -248,51 +249,56 @@ impl Repository {
         let base_name = ["main", "master"]
             .into_iter()
             .find(|candidate| branches.iter().any(|branch| branch.name() == *candidate));
-        let base_tip = base_name
-            .map(|name| self.inner.refname_to_id(&format!("refs/heads/{name}")))
-            .transpose()?;
+        let base_tip =
+            base_name.and_then(|name| self.inner.refname_to_id(&format!("refs/heads/{name}")).ok());
 
         // ignore any errors when retrieving user email
         // if the user hasn't configured their email then we will ignore that rule, and continue the UI flow
         let user_email = configured_user_email(&self.inner).ok().flatten();
         let mut rewritten_commits = RewrittenCommitChecker::new(&self.inner);
 
-        branches
+        Ok(branches
             .into_iter()
             .map(|branch| {
+                // This map function swallows all errors
+                // If a particular branch is in a bad state and we can't tell whether it's merged or not
+                // We just choose conservative defaults and let the UI start correctly
                 let is_trunk = base_name == Some(branch.name());
-                let tip = self
-                    .find_branch(&branch)?
-                    .into_reference()
-                    .peel_to_commit()?;
-                let is_merged = match base_tip {
-                    Some(base_tip) => {
-                        tip.id() == base_tip
-                            || self.inner.graph_descendant_of(base_tip, tip.id())?
-                            || rewritten_commits
-                                .is_rewritten_onto(tip.id(), base_tip)
-                                .unwrap_or(false)
-                    }
-                    None => false,
+                let Ok(tip) = self.get_branch_tip(&branch) else {
+                    return CleanBranch::new(branch, is_trunk, false, false);
                 };
+                let is_merged = base_tip.is_some_and(|base_tip| {
+                    tip.id() == base_tip
+                        || self
+                            .inner
+                            .graph_descendant_of(base_tip, tip.id())
+                            .unwrap_or(false)
+                        || rewritten_commits
+                            .is_rewritten_onto(tip.id(), base_tip)
+                            .unwrap_or(false)
+                });
                 let is_authored_by_other = user_email.as_deref().is_some_and(|user_email| {
                     tip.author()
                         .email()
                         .is_ok_and(|author_email| author_email != user_email)
                 });
 
-                Ok(CleanBranch::new(
-                    branch,
-                    is_trunk,
-                    is_merged,
-                    is_authored_by_other,
-                ))
+                CleanBranch::new(branch, is_trunk, is_merged, is_authored_by_other)
             })
-            .collect()
+            .collect())
     }
 
     pub fn current_branch(&self) -> Result<Option<String>, Error> {
         checked_out_branch(&self.inner)
+    }
+
+    fn get_branch_tip(&self, branch: &LocalBranch) -> Result<Commit<'_>, Error> {
+        self.find_branch(branch).and_then(|branch| {
+            branch
+                .into_reference()
+                .peel_to_commit()
+                .map_err(Error::from)
+        })
     }
 
     fn find_branch(&self, branch: &LocalBranch) -> Result<Branch<'_>, Error> {
