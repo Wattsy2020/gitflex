@@ -16,11 +16,7 @@ use crate::{
 };
 
 const SELECTED_COLOUR: Color = Color::Red;
-const SELECTABLE_COLOUR: Color = Color::Black;
-const UNSELECTABLE_COLOUR: Color = Color::Gray;
-const HIGHLIGHTED_COLOUR: Color = Color::White;
 const MATCHED_COLOUR: Color = Color::Yellow;
-const BACKGROUND_COLOUR: Color = Color::Black;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Confirmation {
@@ -214,25 +210,23 @@ impl Branch {
         format!("{marker}{name}{annotation}")
     }
 
-    fn colour(&self, highlighted: bool) -> Color {
+    fn style(&self) -> Style {
+        let style = Style::default();
         if self.selected {
-            SELECTED_COLOUR
-        } else if highlighted {
-            HIGHLIGHTED_COLOUR
+            style.fg(SELECTED_COLOUR)
         } else if self.selectable {
-            SELECTABLE_COLOUR
+            style // default terminal colour to match its theme
         } else {
-            UNSELECTABLE_COLOUR
+            style.add_modifier(Modifier::DIM) // dark terminal colour
         }
     }
 
     pub fn render<M: Mode>(
         &self,
         mode: &M,
-        highlighted: bool,
         matched_ranges: &[std::ops::Range<usize>],
     ) -> ListItem<'static> {
-        let style = Style::default().fg(self.colour(highlighted));
+        let style = self.style();
         let matched_style = style
             .fg(MATCHED_COLOUR)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
@@ -276,6 +270,7 @@ pub struct AppImpl<M> {
     selectable_count: NonZeroUsize,
     search: Search,
     state: ListState,
+    is_light_theme: bool,
 }
 
 impl AppImpl<CleanMode> {
@@ -409,6 +404,7 @@ impl<M> AppImpl<M> {
             selectable_count,
             search,
             state: ListState::default(),
+            is_light_theme: terminal_light::luma().is_ok_and(|luma| luma > 0.6),
         };
         app.sort_for_search();
         app.select_first_branch();
@@ -516,6 +512,20 @@ impl<M> AppImpl<M> {
         Transition::Continue
     }
 
+    fn highlight_style(&self) -> Style {
+        Style::default()
+            // instead of reversed we need to show a white background when in dark theme
+            // and a black background when in light theme
+            // reversed almost does that except for our selected branches it turns the background red which looks bad
+            // so we need to use terminal_light to detect the theme
+            .bg(if self.is_light_theme {
+                Color::Black
+            } else {
+                Color::White
+            })
+            .add_modifier(Modifier::BOLD)
+    }
+
     fn render_branches(&self) -> List<'static>
     where
         M: Mode,
@@ -523,23 +533,12 @@ impl<M> AppImpl<M> {
         let items = self
             .branches
             .iter()
-            .enumerate()
-            .map(|(position, branch)| {
-                branch.render(
-                    &self.mode,
-                    self.position() == position,
-                    &self.search.match_ranges(branch.name()),
-                )
-            })
+            .map(|branch| branch.render(&self.mode, &self.search.match_ranges(branch.name())))
             .collect::<Vec<_>>();
 
         List::new(items)
             .block(Block::default().borders(Borders::ALL).title("Branches"))
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .bg(BACKGROUND_COLOUR),
-            )
+            .highlight_style(self.highlight_style())
             .highlight_symbol("> ")
     }
 
